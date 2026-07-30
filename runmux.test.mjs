@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -365,6 +365,7 @@ async function setupHarness(t, options) {
   );
   const fakePackageCommand = path.join(fakeClaudePackageDir, "bin", "claude.mjs");
   const fakeGitScript = path.join(binDir, "git.cmd");
+  const fakeGitUnixScript = path.join(binDir, "git");
   await mkdir(path.dirname(fakePackageCommand), { recursive: true });
   await writeFile(fakeScript, `
 import { appendFileSync } from "node:fs";
@@ -435,6 +436,29 @@ console.log(JSON.stringify({
 `, "utf8");
   await writeFile(fakeCmd, `@echo off\r\n"${process.execPath}" "${fakeScript}" %*\r\n`, "utf8");
   await writeFile(fakeGitScript, `@echo off\r\nif "%GIT_FAKE_MODE%"=="nonrepo" (\r\n  if "%1"=="rev-parse" exit /b 1\r\n  echo SHOULD_NOT_BE_USED\r\n  exit /b 1\r\n)\r\nif "%1"=="rev-parse" (\r\n  echo true\r\n  exit /b 0\r\n)\r\nif "%1"=="status" (\r\n  echo M index.html\r\n  exit /b 0\r\n)\r\nif "%1"=="diff" (\r\n  echo index.html ^| 5 +++--\r\n  exit /b 0\r\n)\r\necho UNKNOWN_GIT_CALL\r\nexit /b 1\r\n`, "utf8");
+  await writeFile(fakeGitUnixScript, `#!/usr/bin/env node
+const [command] = process.argv.slice(2);
+if (process.env.GIT_FAKE_MODE === "nonrepo") {
+  if (command === "rev-parse") process.exit(1);
+  console.log("SHOULD_NOT_BE_USED");
+  process.exit(1);
+}
+if (command === "rev-parse") {
+  console.log("true");
+  process.exit(0);
+}
+if (command === "status") {
+  console.log("M index.html");
+  process.exit(0);
+}
+if (command === "diff") {
+  console.log("index.html | 5 +++--");
+  process.exit(0);
+}
+console.log("UNKNOWN_GIT_CALL");
+process.exit(1);
+`, "utf8");
+  await chmod(fakeGitUnixScript, 0o755);
 
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
@@ -449,7 +473,7 @@ console.log(JSON.stringify({
     fakeWslScript,
     env: {
       ...process.env,
-      PATH: `${binDir};${process.env.PATH}`,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
       GIT_CEILING_DIRECTORIES: root,
       CLAUDE_CAPTURE_PATH: capturePath,
       CLAUDE_FAKE_RESULT: options.fakeResult,
