@@ -1,0 +1,4 @@
+interface:
+  display_name: "RunMux"
+  short_description: "Run persistent Claude Code subagents safely"
+  default_prompt: "Use $runmux to delegate a read-only analysis to Claude Code."

@@ -1,0 +1,9 @@
+agents.json
+logs/
+node_modules/
+.learnings/
+.runmux/
+*.tgz
+.env
+.env.*
+.DS_Store

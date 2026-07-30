@@ -1,0 +1,45 @@
+{
+  "name": "runmux",
+  "version": "0.1.0",
+  "description": "A local runtime and session multiplexer for AI coding agents.",
+  "license": "MIT",
+  "author": "syscryer",
+  "type": "module",
+  "bin": {
+    "runmux": "./runmux.mjs"
+  },
+  "files": [
+    "runmux.mjs",
+    "runmux.cmd",
+    "runmux.ps1",
+    "skills/runmux",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "start": "node ./runmux.mjs",
+    "check": "node --check ./runmux.mjs",
+    "test": "node --test",
+    "pack:dry": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/syscryer/RunMux.git"
+  },
+  "bugs": {
+    "url": "https://github.com/syscryer/RunMux/issues"
+  },
+  "homepage": "https://github.com/syscryer/RunMux#readme",
+  "keywords": [
+    "ai-agent",
+    "claude-code",
+    "cli",
+    "subagent",
+    "session",
+    "automation"
+  ]
+}
