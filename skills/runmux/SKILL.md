@@ -28,6 +28,16 @@ runmux ask reviewer "只读分析项目结构" --cwd "D:\path\to\repo"
 runmux ask reviewer "继续，只看数据访问层"
 ```
 
+Set provider reasoning effort per task with `--effort`:
+
+```powershell
+runmux once scout "定位相关代码" --cwd "D:\path\to\repo" --effort low
+runmux adversarial review "完整审查当前方案" --cwd "D:\path\to\repo" --effort max
+```
+
+Accepted levels are `low`, `medium`, `high`, `xhigh`, and `max`. RunMux
+validates and forwards the level; the active provider defines its semantics.
+
 ## Safety
 
 - Default to RunMux read-only mode for research, reviews, and second opinions.

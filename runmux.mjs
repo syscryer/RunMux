@@ -23,6 +23,7 @@ const defaultAllowedTools = defaultAllowedToolsWindows;
 const defaultPermissionMode = "none";
 const defaultMaxTurns = "6";
 const defaultTimeoutMs = 120000;
+const supportedEffortLevels = new Set(["low", "medium", "high", "xhigh", "max"]);
 const legacyDefaultAllowedTools = "Read,Grep,Glob,LS";
 const legacyDefaultPermissionMode = "plan";
 const readOnlyAppendSystemPromptWindows = [
@@ -519,7 +520,8 @@ async function health(commandArgs) {
       "--allowedTools",
       "--append-system-prompt",
       "--mcp-config",
-      "--model"
+      "--model",
+      "--effort"
     ];
     const missing = requiredFlags.filter((flag) => !helpText.includes(flag));
     checks.push(missing.length
@@ -636,6 +638,7 @@ async function runAsk(agentName, prompt, values) {
   const storedAllowedTools = values.tools ?? previousAllowedTools ?? runtimeDefaultAllowedTools;
   const cliAllowedTools = yolo && values.tools === undefined ? "none" : storedAllowedTools;
   const disallowedTools = values.disallowedTools ?? previousConfig?.disallowedTools;
+  const effort = values.effort === undefined ? undefined : parseEffort(values.effort);
   const runtimeConfig = await resolveRuntimeConfig(runtime, values, previousConfig, cwd);
   const shouldResume = previous?.sessionId && !values.fresh;
   const timeoutMs = parsePositiveInteger(values.timeoutMs ?? defaultTimeoutMs, "timeout-ms");
@@ -671,6 +674,9 @@ async function runAsk(agentName, prompt, values) {
   }
   if (values.model) {
     claudeArgs.push("--model", values.model);
+  }
+  if (effort) {
+    claudeArgs.push("--effort", effort);
   }
 
   await mkdir(logDir, { recursive: true });
@@ -919,6 +925,7 @@ function normalizeOptionName(name) {
     "append-system": "appendSystemPrompt",
     "append-system-prompt": "appendSystemPrompt",
     model: "model",
+    effort: "effort",
     role: "role",
     agent: "agent",
     "probe-file": "probeFile",
@@ -1439,6 +1446,14 @@ function parsePositiveInteger(value, name) {
   return parsed;
 }
 
+function parseEffort(value) {
+  const normalized = String(value).toLowerCase();
+  if (!supportedEffortLevels.has(normalized)) {
+    throw new Error("--effort 仅支持 low、medium、high、xhigh 或 max。");
+  }
+  return normalized;
+}
+
 function extractResult(payload) {
   if (typeof payload.result === "string") {
     return payload.result;
@@ -1551,6 +1566,7 @@ ask 选项：
   --system <text>              设置 system prompt
   --append-system <text>       追加 system prompt
   --model <name>               指定 Claude Code 模型
+  --effort <level>             指定思考等级：low、medium、high、xhigh 或 max
   --agent <name>               smoke 使用的临时 agent 名，默认 __smoke__
   --probe-file <path>          smoke 检查的工作区文件，默认 README.md
   --role <critic|judge>        quick-adversarial 使用，默认 critic

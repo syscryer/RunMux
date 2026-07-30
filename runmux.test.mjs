@@ -70,6 +70,54 @@ test("once forces a fresh run without changing stored agent state", async (t) =>
   assert.equal(state.agents.reviewer.cwd, "D:\\old");
 });
 
+test("once validates and forwards the requested effort level", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "EFFORT_OK",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "reviewer",
+    "use more reasoning",
+    "--cwd",
+    env.workspace,
+    "--effort",
+    "MAX",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  assert.match(run.stdout, /EFFORT_OK/);
+
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--effort") + 1], "max");
+});
+
+test("once rejects an unsupported effort level before invoking Claude", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "SHOULD_NOT_RUN",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "reviewer",
+    "invalid effort",
+    "--cwd",
+    env.workspace,
+    "--effort",
+    "ultra",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /--effort 仅支持 low、medium、high、xhigh 或 max/);
+  await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
 test("smoke runs a fresh live probe without persisting a smoke agent", async (t) => {
   const env = await setupHarness(t, {
     fakeResult: "RUNMUX_SMOKE_OK\nREADME.md: 存在",
@@ -204,6 +252,8 @@ test("ask runs Claude through WSL runtime with explicit user and distro", async 
     env.fakeWslScript,
     "--wsl-claude",
     "claude",
+    "--effort",
+    "high",
     "--claude",
     env.fakeScript
   ], env);
@@ -231,6 +281,7 @@ test("ask runs Claude through WSL runtime with explicit user and distro", async 
     "-lc",
     "exec '/home/mnl/.local/bin/claude' \"$@\""
   ]);
+  assert.equal(runRecord.args[runRecord.args.indexOf("--effort") + 1], "high");
   assert.equal(runRecord.args.includes("--resume"), false);
   const allowedTools = runRecord.args[runRecord.args.indexOf("--allowedTools") + 1];
   assert.match(allowedTools, /Bash\(cat \*\)/);
@@ -379,7 +430,7 @@ if (args.includes("--version")) {
 }
 
 if (args.includes("--help")) {
-  console.log("-p --output-format --name --resume --dangerously-skip-permissions --allowedTools --append-system-prompt --mcp-config --model");
+  console.log("-p --output-format --name --resume --dangerously-skip-permissions --allowedTools --append-system-prompt --mcp-config --model --effort");
   process.exit(0);
 }
 

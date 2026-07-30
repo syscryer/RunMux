@@ -16,6 +16,7 @@ RunMux v0.1 ships with a Claude Code adapter. The CLI and state model are design
 - Focused diff review and adversarial review workflows
 - Native Windows Claude Code discovery, including npm shims
 - WSL execution with automatic user and path detection
+- Provider reasoning effort control with `--effort`
 - Human-readable output plus `--json` for automation
 - Local state and logs under `~/.runmux`
 
@@ -79,6 +80,18 @@ Use WSL from Windows:
 ```powershell
 runmux ask reviewer "Review the current changes." --cwd "D:\code\project" --runtime wsl
 ```
+
+Set the reasoning effort for a task:
+
+```bash
+runmux once scout "Find the relevant code paths." --cwd /path/to/project --effort low
+runmux adversarial review "Challenge the proposed design." --cwd /path/to/project --effort max
+```
+
+RunMux accepts `low`, `medium`, `high`, `xhigh`, and `max`. It validates the
+value and forwards it to the active provider adapter without redefining what
+the level means. In v0.1, the Claude Code adapter passes it through as
+`claude --effort <level>`.
 
 ## Commands
 
