@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -192,6 +193,12 @@ ${probeFile}: ${expectedStatus}`;
     return;
   }
 
+  if (values.stream) {
+    console.error(`\n[runmux] smoke: ${expectedLine}`);
+    console.error(`[runmux] smoke agent=${answer.agentName} session=${answer.sessionId || "未返回"} log=${answer.logPath}`);
+    return;
+  }
+
   console.log(`[OK] smoke: ${expectedLine}`);
   console.error(`\n[runmux] smoke agent=${answer.agentName} session=${answer.sessionId || "未返回"} log=${answer.logPath}`);
 }
@@ -329,6 +336,10 @@ ${critic.result}
   console.error(`[runmux] adversarial step 3/3 judge=${judgeName}`);
   const judge = await runAsk(judgeName, judgePrompt, safeValues);
 
+  if (values.stream) {
+    return;
+  }
+
   if (values.json) {
     console.log(JSON.stringify({
       task: prompt,
@@ -405,6 +416,10 @@ ${prompt}
   console.error(`[runmux] quick-adversarial role=${role} agent=${agentName}`);
   const answer = await runAsk(agentName, rolePrompt, safeValues);
 
+  if (values.stream) {
+    return;
+  }
+
   if (values.json) {
     console.log(JSON.stringify({
       task: prompt,
@@ -464,6 +479,10 @@ ${extraPrompt || "无"}`;
   console.error(`[runmux] diff-review agent=${agentName}`);
   const answer = await runAsk(agentName, reviewPrompt, safeValues);
 
+  if (values.stream) {
+    return;
+  }
+
   if (values.json) {
     console.log(JSON.stringify({
       agent: summarizeAnswer(answer),
@@ -514,6 +533,9 @@ async function health(commandArgs) {
     const requiredFlags = [
       "-p",
       "--output-format",
+      "--verbose",
+      "--include-partial-messages",
+      "--forward-subagent-text",
       "--name",
       "--resume",
       "--dangerously-skip-permissions",
@@ -643,7 +665,7 @@ async function runAsk(agentName, prompt, values) {
   const shouldResume = previous?.sessionId && !values.fresh;
   const timeoutMs = parsePositiveInteger(values.timeoutMs ?? defaultTimeoutMs, "timeout-ms");
 
-  const claudeArgs = ["-p", prompt, "--output-format", "json", "--max-turns", maxTurns];
+  const claudeArgs = ["-p", prompt, ...getClaudeOutputArgs(values.stream), "--max-turns", maxTurns];
 
   claudeArgs.push("--name", agentName);
   if (shouldResume) {
@@ -682,29 +704,30 @@ async function runAsk(agentName, prompt, values) {
   await mkdir(logDir, { recursive: true });
   const startedAt = new Date();
   const invocation = buildClaudeInvocation(runtimeConfig, claudeArgs);
-  const run = await runProcess(invocation.command, invocation.args, invocation.cwd, { timeoutMs });
+  const run = await runProcess(invocation.command, invocation.args, invocation.cwd, values.stream
+    ? {
+        timeoutMs,
+        onStdout: (chunk) => process.stdout.write(chunk),
+        onStderr: (chunk) => process.stderr.write(chunk)
+      }
+    : { timeoutMs });
   const logPath = await writeRunLog(agentName, startedAt, {
     command: invocation.command,
     args: maskArgs(invocation.args),
     cwd: invocation.cwd,
     workspaceCwd: cwd,
     runtime: runtimeConfig.runtime,
+    stream: Boolean(values.stream),
     exitCode: run.exitCode,
     stdout: run.stdout,
     stderr: run.stderr
   });
 
-  let payload = null;
-  if (run.stdout.trim()) {
-    try {
-      payload = JSON.parse(run.stdout);
-    } catch {
-      payload = null;
-    }
-  }
+  const payload = parseProviderPayload(run.stdout, values.stream);
 
   if (run.exitCode !== 0) {
-    throw new Error(`Claude Code 执行失败，退出码 ${run.exitCode}。\n日志：${logPath}\n${run.stderr.trim()}`);
+    const stderrDetail = values.stream ? "" : `\n${run.stderr.trim()}`;
+    throw new Error(`Claude Code 执行失败，退出码 ${run.exitCode}。\n日志：${logPath}${stderrDetail}`);
   }
 
   if (!payload) {
@@ -748,6 +771,14 @@ async function runAsk(agentName, prompt, values) {
 }
 
 function printAskAnswer(answer, values) {
+  if (values.stream) {
+    if (answer.yolo) {
+      console.error("\n[runmux] YOLO 已启用：Claude Code 可以跳过权限确认并修改文件。");
+    }
+    console.error(`\n[runmux] agent=${answer.agentName} session=${answer.sessionId || "未返回"} log=${answer.logPath}`);
+    return;
+  }
+
   if (values.json) {
     console.log(JSON.stringify(answer.payload, null, 2));
     return;
@@ -888,7 +919,7 @@ function parseOptions(rawArgs) {
 
     const [rawKey, inlineValue] = arg.slice(2).split("=", 2);
     const key = normalizeOptionName(rawKey);
-    const booleanKeys = new Set(["fresh", "json", "yolo", "safe"]);
+    const booleanKeys = new Set(["fresh", "json", "stream", "yolo", "safe"]);
 
     if (booleanKeys.has(key)) {
       values[key] = inlineValue === undefined ? true : inlineValue !== "false";
@@ -902,7 +933,14 @@ function parseOptions(rawArgs) {
     values[key] = value;
   }
 
+  validateOutputOptions(values);
   return { values, rest };
+}
+
+function validateOutputOptions(values) {
+  if (values.stream && values.json) {
+    throw new Error("--stream 与 --json 不能同时使用。");
+  }
 }
 
 function normalizeOptionName(name) {
@@ -933,6 +971,7 @@ function normalizeOptionName(name) {
     "timeout-ms": "timeoutMs",
     fresh: "fresh",
     json: "json",
+    stream: "stream",
     yolo: "yolo",
     safe: "safe"
   };
@@ -1276,6 +1315,8 @@ async function runProcess(command, commandArgs, cwd, options = {}) {
 
     let stdout = "";
     let stderr = "";
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     let settled = false;
     const timeoutMs = options.timeoutMs;
     const timer = timeoutMs
@@ -1292,10 +1333,12 @@ async function runProcess(command, commandArgs, cwd, options = {}) {
       child.stdin.end();
     }
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
+      stdout += stdoutDecoder.write(chunk);
+      options.onStdout?.(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
+      stderr += stderrDecoder.write(chunk);
+      options.onStderr?.(chunk);
     });
     child.on("error", (error) => {
       if (timer) {
@@ -1309,6 +1352,8 @@ async function runProcess(command, commandArgs, cwd, options = {}) {
         clearTimeout(timer);
       }
       settled = true;
+      stdout += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
       resolve({ exitCode, stdout, stderr });
     });
   });
@@ -1382,7 +1427,7 @@ async function readLogEntries(target) {
       continue;
     }
 
-    const payload = parseJsonOrNull(log.stdout);
+    const payload = parseProviderPayload(log.stdout, isStreamLog(log));
     entries.push({
       file: logPath,
       startedAt: startedAtFromLogFile(file),
@@ -1438,6 +1483,26 @@ function parseJsonOrNull(text) {
   }
 }
 
+function parseProviderPayload(text, stream = false) {
+  if (!stream) {
+    return parseJsonOrNull(text);
+  }
+
+  const payloads = String(text || "")
+    .split(/\r?\n/)
+    .map(parseJsonOrNull)
+    .filter(Boolean);
+  return payloads.findLast((payload) => payload.type === "result") || null;
+}
+
+function isStreamLog(log) {
+  if (typeof log.stream === "boolean") {
+    return log.stream;
+  }
+  const outputFormatIndex = (log.args || []).findIndex((arg) => arg === "--output-format");
+  return outputFormatIndex !== -1 && log.args[outputFormatIndex + 1] === "stream-json";
+}
+
 function parsePositiveInteger(value, name) {
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -1452,6 +1517,12 @@ function parseEffort(value) {
     throw new Error("--effort 仅支持 low、medium、high、xhigh 或 max。");
   }
   return normalized;
+}
+
+function getClaudeOutputArgs(stream) {
+  return stream
+    ? ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--forward-subagent-text"]
+    : ["--output-format", "json"];
 }
 
 function extractResult(payload) {
@@ -1574,5 +1645,6 @@ ask 选项：
   --timeout-ms <n>             Claude 调用超时时间，默认 120000
   --claude <path>              指定 claude 可执行文件
   --json                       输出完整 JSON
+  --stream                     实时透传 Agent 原始 JSONL 事件；不能与 --json 同时使用
 `);
 }

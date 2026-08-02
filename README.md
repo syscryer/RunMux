@@ -18,6 +18,7 @@ RunMux v0.1 ships with a Claude Code adapter. The CLI and state model are design
 - WSL execution with automatic user and path detection
 - Provider reasoning effort control with `--effort`
 - Human-readable output plus `--json` for automation
+- Real-time provider-native JSONL output with `--stream`
 - Local state and logs under `~/.runmux`
 
 ## Requirements
@@ -123,6 +124,20 @@ runmux once reviewer "Summarize the module boundaries." --cwd /path/to/project -
 
 Diagnostics go to stderr where practical. Command failures return a non-zero exit code.
 
+For a parent agent such as CodeM that needs progress before the child exits,
+use `--stream`:
+
+```powershell
+runmux ask reviewer "分析项目并持续报告进度" --cwd "D:\code\project" --stream
+```
+
+In stream mode, stdout is the active provider's native JSONL stream and RunMux
+diagnostics remain on stderr. RunMux does not wrap or normalize events, so the
+caller must select a parser using the agent/provider type. The current Claude
+Code adapter enables `stream-json`, verbose events, partial messages, and
+forwarded subagent text. `--stream` cannot be combined with `--json`; commands
+without `--stream` keep their existing final-output behavior.
+
 ## State and Environment
 
 RunMux stores runtime data outside source repositories:
@@ -160,7 +175,12 @@ After installation, a future Codex task can invoke `$runmux` to use the CLI with
 
 ## CodeM Integration
 
-CodeM or another agent host can call RunMux as a subprocess and consume `--json` output. Use `once` for isolated tasks and `ask` with a stable agent name when session reuse matters.
+CodeM or another agent host can call RunMux as a subprocess and consume
+`--stream` stdout while the child is running. Route stderr separately, parse
+stdout according to the configured agent/provider type, and use the process
+exit status as the final success signal. Use `--json` when only one final
+object is needed, `once` for isolated tasks, and `ask` with a stable agent name
+when session reuse matters.
 
 RunMux does not store API keys. Claude Code authentication remains owned by the installed Claude Code runtime.
 

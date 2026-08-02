@@ -17,6 +17,7 @@ For the current Claude Code provider, stream mode replaces
 
 ```text
 --output-format stream-json
+--verbose
 --include-partial-messages
 --forward-subagent-text
 ```

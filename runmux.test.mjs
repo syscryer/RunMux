@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -116,6 +117,165 @@ test("once rejects an unsupported effort level before invoking Claude", async (t
   assert.equal(run.exitCode, 1);
   assert.match(run.stderr, /--effort 仅支持 low、medium、high、xhigh 或 max/);
   await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
+test("ask streams native Claude JSONL before the provider finishes and persists the final result", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "STREAM_OK",
+    streamDelayMs: 250,
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "ask",
+    "reviewer",
+    "stream progress",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--claude",
+    env.fakeScript
+  ], env, {
+    onFirstStdout: () => assert.equal(existsSync(env.finishPath), false)
+  });
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const lines = run.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((line) => line.type), ["system", "result"]);
+  assert.equal(lines[1].result, "STREAM_OK");
+  assert.doesNotMatch(run.stdout, /\[runmux\]/);
+  assert.match(run.stderr, /\[runmux\] agent=reviewer/);
+
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  assert.equal(args.includes("--verbose"), true);
+  assert.equal(args.includes("--include-partial-messages"), true);
+  assert.equal(args.includes("--forward-subagent-text"), true);
+
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.equal(state.agents.reviewer.sessionId, "fake-session");
+  assert.equal(state.agents.reviewer.lastCostUsd, 0.01);
+
+  const transcript = await runAgent(["transcript", "reviewer"], env);
+  assert.equal(transcript.exitCode, 0, transcript.stderr);
+  assert.match(transcript.stdout, /STREAM_OK/);
+  assert.doesNotMatch(transcript.stdout, /\\"type\\":\\"system\\"/);
+});
+
+test("once stream remains ephemeral", async (t) => {
+  const initialState = {
+    version: 1,
+    agents: {
+      reviewer: {
+        name: "reviewer",
+        cwd: "D:\\old",
+        sessionId: "old-session"
+      }
+    }
+  };
+  const env = await setupHarness(t, { fakeResult: "STREAM_ONCE_OK", initialState });
+
+  const run = await runAgent([
+    "once",
+    "reviewer",
+    "stream once",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  assert.equal(JSON.parse(run.stdout.trim().split(/\r?\n/).at(-1)).result, "STREAM_ONCE_OK");
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.deepEqual(state, initialState);
+});
+
+test("stream rejects the final JSON output mode before invoking Claude", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "SHOULD_NOT_RUN",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "reviewer",
+    "invalid output modes",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--json",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /--stream 与 --json 不能同时使用/);
+  await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
+test("stream forwards malformed lines but rejects a missing final result without changing state", async (t) => {
+  const initialState = {
+    version: 1,
+    agents: {
+      reviewer: {
+        name: "reviewer",
+        cwd: "D:\\old",
+        sessionId: "old-session"
+      }
+    }
+  };
+  const env = await setupHarness(t, {
+    fakeResult: "UNUSED",
+    streamMalformed: true,
+    streamOmitResult: true,
+    initialState
+  });
+
+  const run = await runAgent([
+    "ask",
+    "reviewer",
+    "incomplete stream",
+    "--fresh",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stdout, /not-json/);
+  assert.match(run.stderr, /没有返回可解析 JSON/);
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.deepEqual(state, initialState);
+});
+
+test("stream preserves provider stdout on a non-zero exit without changing state", async (t) => {
+  const initialState = { version: 1, agents: {} };
+  const env = await setupHarness(t, {
+    fakeResult: "FAILED_STREAM_RESULT",
+    fakeExitCode: 7,
+    initialState
+  });
+
+  const run = await runAgent([
+    "ask",
+    "reviewer",
+    "failing stream",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.equal(JSON.parse(run.stdout.trim().split(/\r?\n/).at(-1)).result, "FAILED_STREAM_RESULT");
+  assert.match(run.stderr, /Claude Code 执行失败，退出码 7/);
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.deepEqual(state, initialState);
 });
 
 test("smoke runs a fresh live probe without persisting a smoke agent", async (t) => {
@@ -393,6 +553,41 @@ test("WSL runtime replaces stale Windows default tools from existing agent state
   assert.equal(runRecord.args[runRecord.args.indexOf("--resume") + 1], "old-wsl-session");
 });
 
+test("ask streams native Claude JSONL through the WSL runtime", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "WSL_STREAM_OK",
+    fakeWslPath: "/mnt/d/workspace",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "ask",
+    "wsl-streamer",
+    "stream through wsl",
+    "--cwd",
+    env.workspace,
+    "--runtime",
+    "wsl",
+    "--wsl-user",
+    "mnl",
+    "--wsl-exe",
+    env.fakeWslScript,
+    "--stream"
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const lines = run.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((line) => line.type), ["system", "result"]);
+  assert.equal(lines[1].result, "WSL_STREAM_OK");
+
+  const records = await readCapturedRecords(env.capturePath);
+  const runRecord = records.find((record) => record.kind === "wsl-run");
+  assert.equal(runRecord.args[runRecord.args.indexOf("--output-format") + 1], "stream-json");
+  assert.equal(runRecord.args.includes("--verbose"), true);
+  assert.equal(runRecord.args.includes("--include-partial-messages"), true);
+  assert.equal(runRecord.args.includes("--forward-subagent-text"), true);
+});
+
 async function setupHarness(t, options) {
   const root = await mkdtemp(path.join(os.tmpdir(), "runmux-test-"));
   const workspace = path.join(root, "workspace");
@@ -400,6 +595,7 @@ async function setupHarness(t, options) {
   const statePath = path.join(root, "agents.json");
   const logDir = path.join(root, "logs");
   const capturePath = path.join(root, "claude-args.jsonl");
+  const finishPath = path.join(root, "claude-finished.txt");
 
   await mkdir(workspace, { recursive: true });
   await mkdir(binDir, { recursive: true });
@@ -430,8 +626,35 @@ if (args.includes("--version")) {
 }
 
 if (args.includes("--help")) {
-  console.log("-p --output-format --name --resume --dangerously-skip-permissions --allowedTools --append-system-prompt --mcp-config --model --effort");
+  console.log("-p --output-format --verbose --include-partial-messages --forward-subagent-text --name --resume --dangerously-skip-permissions --allowedTools --append-system-prompt --mcp-config --model --effort");
   process.exit(0);
+}
+
+const outputFormatIndex = args.indexOf("--output-format");
+if (outputFormatIndex >= 0 && args[outputFormatIndex + 1] === "stream-json") {
+  process.stdout.write(JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: "fake-session"
+  }) + "\\n");
+  if (process.env.CLAUDE_FAKE_STREAM_MALFORMED === "1") {
+    process.stdout.write("not-json\\n");
+  }
+  const delayMs = Number(process.env.CLAUDE_FAKE_STREAM_DELAY_MS || 0);
+  if (delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  appendFileSync(process.env.CLAUDE_FAKE_FINISH_PATH, "done\\n");
+  if (process.env.CLAUDE_FAKE_STREAM_OMIT_RESULT !== "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: process.env.CLAUDE_FAKE_RESULT || "OK",
+      session_id: "fake-session",
+      total_cost_usd: 0.01
+    }) + "\\n");
+  }
+  process.exit(Number(process.env.CLAUDE_FAKE_EXIT_CODE || 0));
 }
 
 console.log(JSON.stringify({
@@ -479,11 +702,22 @@ if (shellCommand.includes("command -v 'claude'") || shellCommand.includes("comma
 }
 
 appendFileSync(process.env.CLAUDE_CAPTURE_PATH, JSON.stringify({ kind: "wsl-run", args }) + "\\n");
-console.log(JSON.stringify({
-  result: process.env.CLAUDE_FAKE_RESULT || "OK",
-  session_id: "fake-wsl-session",
-  total_cost_usd: 0
-}));
+if (args.includes("stream-json")) {
+  console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "fake-wsl-session" }));
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    result: process.env.CLAUDE_FAKE_RESULT || "OK",
+    session_id: "fake-wsl-session",
+    total_cost_usd: 0
+  }));
+} else {
+  console.log(JSON.stringify({
+    result: process.env.CLAUDE_FAKE_RESULT || "OK",
+    session_id: "fake-wsl-session",
+    total_cost_usd: 0
+  }));
+}
 `, "utf8");
   await writeFile(fakeCmd, `@echo off\r\n"${process.execPath}" "${fakeScript}" %*\r\n`, "utf8");
   await writeFile(fakeGitScript, `@echo off\r\nif "%GIT_FAKE_MODE%"=="nonrepo" (\r\n  if "%1"=="rev-parse" exit /b 1\r\n  echo SHOULD_NOT_BE_USED\r\n  exit /b 1\r\n)\r\nif "%1"=="rev-parse" (\r\n  echo true\r\n  exit /b 0\r\n)\r\nif "%1"=="status" (\r\n  echo M index.html\r\n  exit /b 0\r\n)\r\nif "%1"=="diff" (\r\n  echo index.html ^| 5 +++--\r\n  exit /b 0\r\n)\r\necho UNKNOWN_GIT_CALL\r\nexit /b 1\r\n`, "utf8");
@@ -520,6 +754,7 @@ process.exit(1);
     statePath,
     logDir,
     capturePath,
+    finishPath,
     fakeScript,
     fakeWslScript,
     env: {
@@ -528,6 +763,11 @@ process.exit(1);
       GIT_CEILING_DIRECTORIES: root,
       CLAUDE_CAPTURE_PATH: capturePath,
       CLAUDE_FAKE_RESULT: options.fakeResult,
+      CLAUDE_FAKE_EXIT_CODE: String(options.fakeExitCode || 0),
+      CLAUDE_FAKE_FINISH_PATH: finishPath,
+      CLAUDE_FAKE_STREAM_DELAY_MS: String(options.streamDelayMs || 0),
+      CLAUDE_FAKE_STREAM_MALFORMED: options.streamMalformed ? "1" : "0",
+      CLAUDE_FAKE_STREAM_OMIT_RESULT: options.streamOmitResult ? "1" : "0",
       CLAUDE_FAKE_WSL_PATH: options.fakeWslPath || "/mnt/fake/workspace",
       GIT_FAKE_MODE: options.gitMode || "repo",
       RUNMUX_STATE_PATH: statePath,
@@ -536,7 +776,7 @@ process.exit(1);
   };
 }
 
-async function runAgent(args, harness) {
+async function runAgent(args, harness, options = {}) {
   return await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [agentScript, ...args], {
       cwd: repoDir,
@@ -546,7 +786,12 @@ async function runAgent(args, harness) {
 
     let stdout = "";
     let stderr = "";
+    let firstStdout = true;
     child.stdout.on("data", (chunk) => {
+      if (firstStdout) {
+        firstStdout = false;
+        options.onFirstStdout?.(chunk);
+      }
       stdout += chunk.toString("utf8");
     });
     child.stderr.on("data", (chunk) => {

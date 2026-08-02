@@ -4,6 +4,7 @@ All notable changes to RunMux will be documented in this file.
 
 ## Unreleased
 
+- Add opt-in `--stream` forwarding for provider-native real-time JSONL events while preserving existing default output.
 - Add provider-neutral `--effort low|medium|high|xhigh|max` validation and pass-through.
 
 ## 0.1.0 - 2026-07-30

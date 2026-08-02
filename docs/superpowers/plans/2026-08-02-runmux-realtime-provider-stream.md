@@ -25,7 +25,7 @@
 **Files:**
 - Modify: `runmux.mjs`
 
-- [ ] **Step 1: Parse and validate the stream option**
+- [x] **Step 1: Parse and validate the stream option**
 
 Add `stream` to the boolean option names and normalized names. Validate after parsing:
 
@@ -39,31 +39,33 @@ function validateOutputOptions(values) {
 
 Call this from `parseOptions` before returning so invalid combinations fail before runtime discovery or provider invocation.
 
-- [ ] **Step 2: Select Claude output arguments**
+- [x] **Step 2: Select Claude output arguments**
 
 Replace the fixed output-format portion of `claudeArgs` with:
 
 ```js
 function getClaudeOutputArgs(stream) {
   return stream
-    ? ["--output-format", "stream-json", "--include-partial-messages", "--forward-subagent-text"]
+    ? ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--forward-subagent-text"]
     : ["--output-format", "json"];
 }
 
 const claudeArgs = ["-p", prompt, ...getClaudeOutputArgs(values.stream), "--max-turns", maxTurns];
 ```
 
-- [ ] **Step 3: Forward process chunks while retaining buffers**
+- [x] **Step 3: Forward process chunks while retaining buffers**
 
-Extend `runProcess` options with optional callbacks and invoke them with the exact `Buffer` received:
+Extend `runProcess` options with optional callbacks and invoke them with the exact `Buffer` received. Use `StringDecoder` for the internal copy so a UTF-8 character split across chunks remains intact:
 
 ```js
+const stdoutDecoder = new StringDecoder("utf8");
+const stderrDecoder = new StringDecoder("utf8");
 child.stdout.on("data", (chunk) => {
-  stdout += chunk.toString("utf8");
+  stdout += stdoutDecoder.write(chunk);
   options.onStdout?.(chunk);
 });
 child.stderr.on("data", (chunk) => {
-  stderr += chunk.toString("utf8");
+  stderr += stderrDecoder.write(chunk);
   options.onStderr?.(chunk);
 });
 ```
@@ -80,7 +82,7 @@ const processOptions = values.stream
   : { timeoutMs };
 ```
 
-- [ ] **Step 4: Parse one JSON object or a JSONL final event**
+- [x] **Step 4: Parse one JSON object or a JSONL final event**
 
 Replace single-object parsing at run completion and transcript loading with a shared parser:
 
@@ -99,11 +101,11 @@ function parseProviderPayload(text, stream = false) {
 
 For historical logs, detect stream mode from the stored invocation's `--output-format stream-json` pair and call the parser accordingly.
 
-- [ ] **Step 5: Preserve stdout purity at completion**
+- [x] **Step 5: Preserve stdout purity at completion**
 
 Have `printAskAnswer` skip payload/result printing when `values.stream` is true, while keeping RunMux's agent/session/log summary on stderr. Add `stream: Boolean(values.stream)` to run logs so future readers do not rely only on argument inspection.
 
-- [ ] **Step 6: Check syntax**
+- [x] **Step 6: Check syntax**
 
 Run:
 
@@ -118,7 +120,7 @@ Expected: exit code 0 with no syntax error.
 **Files:**
 - Modify: `runmux.test.mjs`
 
-- [ ] **Step 1: Extend the fake Claude provider**
+- [x] **Step 1: Extend the fake Claude provider**
 
 Allow the harness to emit configurable JSONL records with a delay between the first and final record. The final fixture must use Claude-compatible fields:
 
@@ -132,11 +134,11 @@ Allow the harness to emit configurable JSONL records with a delay between the fi
 }
 ```
 
-- [ ] **Step 2: Prove output arrives before process completion**
+- [x] **Step 2: Prove output arrives before process completion**
 
 Spawn RunMux directly, resolve a promise on its first stdout `data` event, and assert the child has not emitted `close` yet. Then await completion and compare stdout against the exact fixture JSONL bytes.
 
-- [ ] **Step 3: Cover invocation, state, and output validation**
+- [x] **Step 3: Cover invocation, state, and output validation**
 
 Add tests that assert:
 
@@ -151,11 +153,11 @@ assert.equal(state.agents.reviewer.lastCostUsd, 0.01);
 
 Also assert `once --stream` does not persist state and `--stream --json` fails before the capture file is created.
 
-- [ ] **Step 4: Cover malformed/incomplete/failing streams and WSL**
+- [x] **Step 4: Cover malformed/incomplete/failing streams and WSL**
 
 Verify malformed intermediate lines still reach stdout, a successful exit without a `result` event fails without changing prior state, a non-zero provider exit preserves emitted stdout, and the WSL fake receives `stream-json` arguments.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run:
 
@@ -172,7 +174,7 @@ Expected: all existing and new tests pass with exit code 0.
 - Modify: `CHANGELOG.md`
 - Modify: `skills/runmux/SKILL.md`
 
-- [ ] **Step 1: Document machine consumption**
+- [x] **Step 1: Document machine consumption**
 
 Add this usage shape to README and the bundled skill:
 
@@ -182,11 +184,11 @@ runmux ask reviewer "分析项目并持续报告进度" --cwd "D:\code\project" 
 
 State that stdout is provider-native JSONL, stderr contains diagnostics, consumers must select a parser by agent/provider type, and `--json` cannot be combined with `--stream`.
 
-- [ ] **Step 2: Record the change**
+- [x] **Step 2: Record the change**
 
 Add an Unreleased changelog entry describing opt-in real-time native provider event forwarding with unchanged default behavior.
 
-- [ ] **Step 3: Run package verification**
+- [x] **Step 3: Run package verification**
 
 Run:
 
@@ -203,7 +205,7 @@ Expected: every command exits 0, and the dry-run package includes `runmux.mjs`, 
 **Files:**
 - No file changes.
 
-- [ ] **Step 1: Check runtime compatibility**
+- [x] **Step 1: Check runtime compatibility**
 
 Run:
 
@@ -213,7 +215,7 @@ runmux health --json
 
 Expected: Claude Code is available and the required stream flags appear in health checks.
 
-- [ ] **Step 2: Run a bounded live stream**
+- [x] **Step 2: Run a bounded live stream**
 
 Invoke:
 
@@ -223,6 +225,6 @@ runmux once stream-smoke "只输出 RUNMUX_STREAM_OK" --cwd "D:\ai_proj\RunMux" 
 
 Observe at least one JSONL event before process exit and a final `type: result` event containing `RUNMUX_STREAM_OK`. Confirm RunMux writes its summary only to stderr.
 
-- [ ] **Step 3: Inspect repository state**
+- [x] **Step 3: Inspect repository state**
 
 Run `git diff --check` and `git status --short`. Expected: no whitespace errors and only the planned source, test, documentation, and plan files are modified.

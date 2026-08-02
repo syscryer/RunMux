@@ -38,6 +38,18 @@ runmux adversarial review "完整审查当前方案" --cwd "D:\path\to\repo" --e
 Accepted levels are `low`, `medium`, `high`, `xhigh`, and `max`. RunMux
 validates and forwards the level; the active provider defines its semantics.
 
+Use provider-native streaming when a parent agent needs progress before the
+child process exits:
+
+```powershell
+runmux ask reviewer "分析项目并持续报告进度" --cwd "D:\path\to\repo" --stream
+```
+
+With `--stream`, stdout is the provider's unmodified JSONL event stream and
+RunMux diagnostics use stderr. Select the event parser by agent/provider type.
+Do not combine `--stream` with `--json`; omit `--stream` when only the final
+answer is needed.
+
 ## Safety
 
 - Default to RunMux read-only mode for research, reviews, and second opinions.
