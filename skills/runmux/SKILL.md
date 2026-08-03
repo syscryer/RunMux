@@ -5,7 +5,45 @@ description: Use RunMux to delegate read-only analysis or explicitly authorized 
 
 # RunMux
 
-Use the installed `runmux` command. RunMux v0.1 uses Claude Code as its execution provider.
+Use the installed `runmux` command. RunMux v0.1 uses Claude Code (CC) as its
+execution provider. Treat CC as a worker supporting the main agent, not as the
+owner of the entire task.
+
+## Delegation Contract
+
+Keep these responsibilities in the main agent, whether it is Codex or another
+capable orchestrator:
+
+- Define requirement boundaries, cross-layer contracts, data flow, tradeoffs,
+  failure behavior, privacy boundaries, and acceptance criteria.
+- Decide the architecture before delegating implementation.
+- Split work into explicit, independently verifiable slices.
+- Review CC output against the real code, inspect every diff, and run the
+  relevant verification before accepting it.
+
+Delegate concrete worker tasks such as collecting protocol samples, locating
+code paths, challenging a proposed design, adding specified tests, or
+implementing one named module against an already-defined contract. CC may
+contribute local analysis and alternatives, but do not hand it the entire
+requirement, architecture, implementation, and acceptance workflow as one
+open-ended task. Do not ask CC to approve its own work.
+
+Every CC prompt must state the exact scope, files or module boundary, required
+behavior, forbidden changes, and verification criteria. CC conclusions and
+code are evidence, not accepted results, until the main agent independently
+verifies them.
+
+## Invocation Policy
+
+Use these flags for every CC worker invocation:
+
+```text
+--effort max --stream --max-turns none --timeout-ms none
+```
+
+This keeps reasoning effort high, exposes progress to the main agent, and
+avoids RunMux stopping a legitimate long-running task. Apply a finite boundary
+only when the user explicitly requests one.
 
 ## Start
 
@@ -18,56 +56,28 @@ runmux health
 Use `once` for isolated work that should not persist state:
 
 ```powershell
-runmux once reviewer "只读分析当前改动，输出结论和依据" --cwd "D:\path\to\repo"
+runmux once protocol-scout "只读采集指定协议样本；不要设计方案，不要修改文件；输出证据和文件位置" --cwd "D:\path\to\repo" --effort max --stream --max-turns none --timeout-ms none
 ```
 
 Use `ask` with a stable name when the session should continue:
 
 ```powershell
-runmux ask reviewer "只读分析项目结构" --cwd "D:\path\to\repo"
-runmux ask reviewer "继续，只看数据访问层"
-```
-
-Set provider reasoning effort per task with `--effort`:
-
-```powershell
-runmux once scout "定位相关代码" --cwd "D:\path\to\repo" --effort low
-runmux adversarial review "完整审查当前方案" --cwd "D:\path\to\repo" --effort max
-```
-
-Accepted levels are `low`, `medium`, `high`, `xhigh`, and `max`. RunMux
-validates and forwards the level; the active provider defines its semantics.
-
-Use provider-native streaming when a parent agent needs progress before the
-child process exits:
-
-```powershell
-runmux ask reviewer "分析项目并持续报告进度" --cwd "D:\path\to\repo" --stream
+runmux ask module-worker "只实现已定义的 changes[] 生成模块；不得修改数据库结构；不要提交；按给定验收项自测" --cwd "D:\path\to\repo" --yolo --effort max --stream --max-turns none --timeout-ms none
+runmux ask module-worker "继续处理同一模块，只修复主 Agent 指出的测试失败" --effort max --stream --max-turns none --timeout-ms none
 ```
 
 With `--stream`, stdout is the provider's unmodified JSONL event stream and
 RunMux diagnostics use stderr. Select the event parser by agent/provider type.
-Do not combine `--stream` with `--json`; omit `--stream` when only the final
-answer is needed.
-
-For long-running work, remove both execution limits explicitly:
-
-```powershell
-runmux ask long-task "完成完整分析并持续报告进度" --cwd "D:\path\to\repo" --max-turns none --timeout-ms none --stream
-```
-
-Regular tasks default to 20 turns and a 10-minute timeout. `0`, `none`, and
-`unlimited` all disable the selected limit. Named `ask` agents persist both
-settings; `once` does not. Use finite values when a task needs a cost or time
-boundary.
+Do not combine `--stream` with `--json`.
 
 ## Safety
 
 - Default to RunMux read-only mode for research, reviews, and second opinions.
 - Use `--yolo` only when the user explicitly authorizes Claude Code to modify files.
 - Scope coding prompts tightly and include `Do not commit` unless the user requested a commit.
-- Do not run Codex and Claude Code edits against the same files concurrently.
-- After a coding run, inspect the diff and execute appropriate verification yourself.
+- Do not run main-agent and CC edits against the same files concurrently.
+- Never accept CC's self-reported success as verification.
+- After every coding run, inspect the diff and execute appropriate verification yourself.
 - Use `--safe` to return a persisted agent to read-only mode.
 
 ## Reviews
@@ -75,9 +85,9 @@ boundary.
 Use focused built-in review workflows:
 
 ```powershell
-runmux diff-review review "重点检查 Windows 兼容性" --cwd "D:\path\to\repo"
-runmux quick-adversarial review "快速挑错当前方案" --cwd "D:\path\to\repo"
-runmux adversarial review "对当前方案做完整对抗验证" --cwd "D:\path\to\repo"
+runmux diff-review review "只审查当前 diff 的 Windows 兼容性，不提出新架构" --cwd "D:\path\to\repo" --effort max --stream --max-turns none --timeout-ms none
+runmux quick-adversarial review "只按既定验收标准挑错当前实现" --cwd "D:\path\to\repo" --effort max --stream --max-turns none --timeout-ms none
+runmux adversarial review "对已确定方案做完整对抗验证，不重新定义需求" --cwd "D:\path\to\repo" --effort max --stream --max-turns none --timeout-ms none
 ```
 
 Adversarial commands are read-only. Run any authorized coding task separately with `ask ... --yolo`, then review it.
