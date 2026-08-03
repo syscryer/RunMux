@@ -119,6 +119,215 @@ test("once rejects an unsupported effort level before invoking Claude", async (t
   await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
 });
 
+test("ask uses the documented default execution limits", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "DEFAULT_LIMITS_OK",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "ask",
+    "reviewer",
+    "use default limits",
+    "--cwd",
+    env.workspace,
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--max-turns") + 1], "20");
+
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.equal(state.agents.reviewer.maxTurns, "20");
+  assert.equal(state.agents.reviewer.timeoutMs, 600000);
+});
+
+for (const unlimitedValue of ["0", "none", "unlimited"]) {
+  test(`ask accepts ${unlimitedValue} as an unlimited execution setting`, async (t) => {
+    const env = await setupHarness(t, {
+      fakeResult: "UNLIMITED_OK",
+      initialState: { version: 1, agents: {} }
+    });
+
+    const run = await runAgent([
+      "ask",
+      "reviewer",
+      "run without limits",
+      "--cwd",
+      env.workspace,
+      "--max-turns",
+      unlimitedValue,
+      "--timeout-ms",
+      unlimitedValue,
+      "--claude",
+      env.fakeScript
+    ], env);
+
+    assert.equal(run.exitCode, 0, run.stderr);
+    const args = await readCapturedArgs(env.capturePath);
+    assert.equal(args.includes("--max-turns"), false);
+
+    const state = JSON.parse(await readFile(env.statePath, "utf8"));
+    assert.equal(state.agents.reviewer.maxTurns, "0");
+    assert.equal(state.agents.reviewer.timeoutMs, 0);
+  });
+}
+
+test("a named agent reuses persisted unlimited execution settings", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "PERSISTED_UNLIMITED_OK",
+    initialState: {
+      version: 1,
+      agents: {
+        reviewer: {
+          name: "reviewer",
+          cwd: "",
+          sessionId: "old-session",
+          maxTurns: "0",
+          timeoutMs: 0
+        }
+      }
+    }
+  });
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  state.agents.reviewer.cwd = env.workspace;
+  await writeFile(env.statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+  const run = await runAgent([
+    "ask",
+    "reviewer",
+    "reuse unlimited settings",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args.includes("--max-turns"), false);
+  const updatedState = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.equal(updatedState.agents.reviewer.timeoutMs, 0);
+});
+
+test("a named agent upgrades the legacy stored default from 6 to 20 turns", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "UPGRADED_DEFAULT_OK",
+    initialState: {
+      version: 1,
+      agents: {
+        reviewer: {
+          name: "reviewer",
+          cwd: "",
+          sessionId: "old-session",
+          maxTurns: "6"
+        }
+      }
+    }
+  });
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  state.agents.reviewer.cwd = env.workspace;
+  await writeFile(env.statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+  const run = await runAgent([
+    "ask",
+    "reviewer",
+    "upgrade the stored default",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--max-turns") + 1], "20");
+  const updatedState = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.equal(updatedState.agents.reviewer.maxTurns, "20");
+});
+
+test("timeout none allows a run that a short timeout terminates", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "NO_TIMEOUT_OK",
+    streamDelayMs: 150,
+    initialState: { version: 1, agents: {} }
+  });
+
+  const timedOut = await runAgent([
+    "once",
+    "short-timeout",
+    "wait for completion",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--timeout-ms",
+    "20",
+    "--claude",
+    env.fakeScript
+  ], env);
+  assert.equal(timedOut.exitCode, 1);
+  assert.match(timedOut.stderr, /执行失败|没有返回可解析 JSON/);
+
+  const unlimited = await runAgent([
+    "once",
+    "no-timeout",
+    "wait for completion",
+    "--cwd",
+    env.workspace,
+    "--stream",
+    "--timeout-ms",
+    "none",
+    "--claude",
+    env.fakeScript
+  ], env);
+  assert.equal(unlimited.exitCode, 0, unlimited.stderr);
+  assert.equal(JSON.parse(unlimited.stdout.trim().split(/\r?\n/).at(-1)).result, "NO_TIMEOUT_OK");
+});
+
+test("execution limits reject negative values before invoking Claude", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "SHOULD_NOT_RUN",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "reviewer",
+    "invalid limit",
+    "--cwd",
+    env.workspace,
+    "--max-turns",
+    "-1",
+    "--claude",
+    env.fakeScript
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /--max-turns 必须是非负整数，或 none\/unlimited/);
+  await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
+test("execution limits reject empty and non-decimal values", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "SHOULD_NOT_RUN",
+    initialState: { version: 1, agents: {} }
+  });
+
+  for (const invalidValue of ["", "1.5", "1e3"]) {
+    const run = await runAgent([
+      "once",
+      "reviewer",
+      "invalid limit syntax",
+      "--cwd",
+      env.workspace,
+      `--timeout-ms=${invalidValue}`,
+      "--claude",
+      env.fakeScript
+    ], env);
+    assert.equal(run.exitCode, 1);
+    assert.match(run.stderr, /--timeout-ms 必须是非负整数，或 none\/unlimited/);
+  }
+  await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
 test("ask streams native Claude JSONL before the provider finishes and persists the final result", async (t) => {
   const env = await setupHarness(t, {
     fakeResult: "STREAM_OK",

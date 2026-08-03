@@ -22,8 +22,10 @@ const defaultAllowedToolsWindows = "Read,Grep,Glob,LS,Bash(rg *),Bash(Get-Conten
 const defaultAllowedToolsWsl = "Read,Grep,Glob,LS,Bash(rg *),Bash(cat *),Bash(head *),Bash(sed *),Bash(ls *),Bash(git diff *),Bash(git status *)";
 const defaultAllowedTools = defaultAllowedToolsWindows;
 const defaultPermissionMode = "none";
-const defaultMaxTurns = "6";
-const defaultTimeoutMs = 120000;
+const defaultMaxTurns = "20";
+const defaultTimeoutMs = 600000;
+const legacyDefaultMaxTurns = "6";
+const unlimitedLimitValues = new Set(["0", "none", "unlimited"]);
 const supportedEffortLevels = new Set(["low", "medium", "high", "xhigh", "max"]);
 const legacyDefaultAllowedTools = "Read,Grep,Glob,LS";
 const legacyDefaultPermissionMode = "plan";
@@ -650,7 +652,10 @@ async function runAsk(agentName, prompt, values) {
     : previousConfig?.permissionMode;
   const permissionMode = values.mode ?? previousPermissionMode ?? defaultPermissionMode;
   const yolo = values.safe ? false : Boolean(values.yolo ?? previousConfig?.yolo ?? false);
-  const maxTurns = String(values.maxTurns ?? previousConfig?.maxTurns ?? defaultMaxTurns);
+  const maxTurns = String(parseExecutionLimit(
+    values.maxTurns ?? normalizeStoredMaxTurns(previousConfig?.maxTurns) ?? defaultMaxTurns,
+    "max-turns"
+  ));
   const runtime = values.runtime ?? previousConfig?.runtime ?? process.env.RUNMUX_RUNTIME ?? "windows";
   const runtimeDefaultAllowedTools = getDefaultAllowedTools(runtime);
   const canReusePreviousTools = !previousConfig?.runtime || previousConfig.runtime === runtime;
@@ -661,11 +666,17 @@ async function runAsk(agentName, prompt, values) {
   const cliAllowedTools = yolo && values.tools === undefined ? "none" : storedAllowedTools;
   const disallowedTools = values.disallowedTools ?? previousConfig?.disallowedTools;
   const effort = values.effort === undefined ? undefined : parseEffort(values.effort);
+  const timeoutMs = parseExecutionLimit(
+    values.timeoutMs ?? previousConfig?.timeoutMs ?? defaultTimeoutMs,
+    "timeout-ms"
+  );
   const runtimeConfig = await resolveRuntimeConfig(runtime, values, previousConfig, cwd);
   const shouldResume = previous?.sessionId && !values.fresh;
-  const timeoutMs = parsePositiveInteger(values.timeoutMs ?? defaultTimeoutMs, "timeout-ms");
 
-  const claudeArgs = ["-p", prompt, ...getClaudeOutputArgs(values.stream), "--max-turns", maxTurns];
+  const claudeArgs = ["-p", prompt, ...getClaudeOutputArgs(values.stream)];
+  if (maxTurns !== "0") {
+    claudeArgs.push("--max-turns", maxTurns);
+  }
 
   claudeArgs.push("--name", agentName);
   if (shouldResume) {
@@ -743,6 +754,7 @@ async function runAsk(agentName, prompt, values) {
       runtime: runtimeConfig.runtime,
       permissionMode,
       maxTurns,
+      timeoutMs,
       allowedTools: storedAllowedTools,
       disallowedTools,
       claudeCommand: runtimeConfig.claudeCommand,
@@ -1019,6 +1031,10 @@ function normalizeStoredAllowedTools(allowedTools, runtime, runtimeDefaultAllowe
     return runtimeDefaultAllowedTools;
   }
   return allowedTools;
+}
+
+function normalizeStoredMaxTurns(maxTurns) {
+  return String(maxTurns ?? "") === legacyDefaultMaxTurns ? defaultMaxTurns : maxTurns;
 }
 
 async function resolveWindowsClaudeCommand(requestedCommand, includeDefaults) {
@@ -1503,10 +1519,18 @@ function isStreamLog(log) {
   return outputFormatIndex !== -1 && log.args[outputFormatIndex + 1] === "stream-json";
 }
 
-function parsePositiveInteger(value, name) {
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`--${name} 必须是正整数。`);
+function parseExecutionLimit(value, name) {
+  const normalized = String(value).trim().toLowerCase();
+  if (unlimitedLimitValues.has(normalized)) {
+    return 0;
+  }
+
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`--${name} 必须是非负整数，或 none/unlimited。`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`--${name} 必须是非负整数，或 none/unlimited。`);
   }
   return parsed;
 }
@@ -1619,13 +1643,19 @@ smoke：
 repair：
   复用已有 agent session，并把上次运行摘要、当前 git status --short 和 git diff --stat 注入 prompt，用于让持续 coder 返工。
 
+执行限制：
+  常规 ask/once/adversarial 默认 max-turns 20；repair 默认 12，diff-review 默认 8，smoke 默认 3。
+  调用超时默认 600000 毫秒（10 分钟）。
+  --max-turns 或 --timeout-ms 传 0、none、unlimited 可关闭对应限制。
+  命名 ask 会持久化这两个设置；旧状态中的默认 max-turns 6 会在下次成功运行时升级为 20。
+
 ask 选项：
   --cwd <path>                 首次创建 agent 时绑定工作目录
   --fresh                      不恢复旧 session，重新开始一轮
   --yolo                       开启改代码模式，跳过 Claude Code 权限确认，并对该 agent 持久生效
   --safe                       关闭该 agent 的 yolo 状态，本次回到安全模式
   --mode <mode>                默认 none，不设置 permission-mode
-  --max-turns <n>              默认 6
+  --max-turns <n|none>         常规任务默认 20；0/none/unlimited 表示不限 turns
   --tools <list>               默认 Read,Grep,Glob,LS 和只读 Bash 白名单；传 none 可不设置 allowedTools
   --disallowed-tools <list>    追加禁用工具
   --runtime <windows|wsl>       选择 Claude Code 运行位置，默认 windows
@@ -1642,7 +1672,7 @@ ask 选项：
   --probe-file <path>          smoke 检查的工作区文件，默认 README.md
   --role <critic|judge>        quick-adversarial 使用，默认 critic
   --last <n>                   transcript 使用，默认 5
-  --timeout-ms <n>             Claude 调用超时时间，默认 120000
+  --timeout-ms <n|none>        默认 600000（10 分钟）；0/none/unlimited 表示不超时
   --claude <path>              指定 claude 可执行文件
   --json                       输出完整 JSON
   --stream                     实时透传 Agent 原始 JSONL 事件；不能与 --json 同时使用

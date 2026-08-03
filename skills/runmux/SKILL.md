@@ -50,6 +50,17 @@ RunMux diagnostics use stderr. Select the event parser by agent/provider type.
 Do not combine `--stream` with `--json`; omit `--stream` when only the final
 answer is needed.
 
+For long-running work, remove both execution limits explicitly:
+
+```powershell
+runmux ask long-task "完成完整分析并持续报告进度" --cwd "D:\path\to\repo" --max-turns none --timeout-ms none --stream
+```
+
+Regular tasks default to 20 turns and a 10-minute timeout. `0`, `none`, and
+`unlimited` all disable the selected limit. Named `ask` agents persist both
+settings; `once` does not. Use finite values when a task needs a cost or time
+boundary.
+
 ## Safety
 
 - Default to RunMux read-only mode for research, reviews, and second opinions.

@@ -4,6 +4,7 @@ All notable changes to RunMux will be documented in this file.
 
 ## Unreleased
 
+- Add unlimited `--max-turns` and `--timeout-ms` values (`0`, `none`, or `unlimited`), raise regular defaults to 20 turns and 10 minutes, and persist both limits for named agents.
 - Add opt-in `--stream` forwarding for provider-native real-time JSONL events while preserving existing default output.
 - Add provider-neutral `--effort low|medium|high|xhigh|max` validation and pass-through.
 

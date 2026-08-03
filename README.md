@@ -94,6 +94,25 @@ value and forwards it to the active provider adapter without redefining what
 the level means. In v0.1, the Claude Code adapter passes it through as
 `claude --effort <level>`.
 
+## Execution Limits
+
+Regular `ask`, `once`, `quick-adversarial`, and `adversarial` runs default to
+20 turns. Specialized defaults remain smaller: `repair` uses 12,
+`diff-review` uses 8, and `smoke` uses 3. The RunMux process timeout defaults
+to 600000 milliseconds (10 minutes).
+
+Disable either limit with `0`, `none`, or `unlimited`:
+
+```powershell
+runmux ask long-task "完成完整分析并持续报告进度" --cwd "D:\code\project" --max-turns none --timeout-ms none --stream
+```
+
+For unlimited turns, RunMux omits the provider's turn-limit argument. A zero
+timeout disables RunMux's process timer. Named `ask` agents persist both
+settings; `once` remains ephemeral. Existing named agents that stored the old
+default of 6 turns are upgraded to 20 on their next successful run. Pass an
+explicit positive number to restore a bounded limit.
+
 ## Commands
 
 | Command | Purpose |
