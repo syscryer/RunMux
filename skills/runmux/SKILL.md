@@ -1,13 +1,14 @@
 ---
 name: runmux
-description: Use RunMux to delegate read-only analysis or explicitly authorized coding tasks to persistent or one-off Claude Code subagents, inspect sessions and transcripts, run diff or adversarial reviews, and use Windows or WSL runtimes. Trigger when a user asks to use RunMux, call Claude Code as a subagent, resume a named Claude session, or get an independent Claude review.
+description: Use RunMux to delegate read-only analysis or explicitly authorized coding tasks to persistent or one-off Claude Code or zcode subagents, inspect sessions and transcripts, run diff or adversarial reviews, and use Windows or WSL runtimes. Trigger when a user asks to use RunMux, call Claude Code or zcode as a subagent, resume a named subagent session, or get an independent review.
 ---
 
 # RunMux
 
-Use the installed `runmux` command. RunMux v0.1 uses Claude Code (CC) as its
-execution provider. Treat CC as a worker supporting the main agent, not as the
-owner of the entire task.
+Use the installed `runmux` command. RunMux v0.1 supports two execution
+providers: Claude Code (CC, the default) and zcode (selected with
+`--provider zcode`). Treat the provider as a worker supporting the main agent,
+not as the owner of the entire task.
 
 ## Delegation Contract
 
@@ -35,7 +36,7 @@ verifies them.
 
 ## Invocation Policy
 
-Use these flags for every CC worker invocation:
+Use these flags for every Claude Code worker invocation:
 
 ```text
 --effort max --stream --max-turns none --timeout-ms none
@@ -45,12 +46,21 @@ This keeps reasoning effort high, exposes progress to the main agent, and
 avoids RunMux stopping a legitimate long-running task. Apply a finite boundary
 only when the user explicitly requests one.
 
+For zcode workers, omit `--effort` and `--max-turns` (zcode owns its reasoning
+level and has no per-run turn limit; RunMux would print stderr notes instead of
+forwarding them) and keep `--stream --timeout-ms none`:
+
+```text
+--provider zcode --stream --timeout-ms none
+```
+
 ## Start
 
 Verify the runtime before investigating failures:
 
 ```powershell
-runmux health
+runmux health                 # Claude Code (default)
+runmux health --provider zcode
 ```
 
 Use `once` for isolated work that should not persist state:
@@ -66,6 +76,14 @@ runmux ask module-worker "只实现已定义的 changes[] 生成模块；不得�
 runmux ask module-worker "继续处理同一模块，只修复主 Agent 指出的测试失败" --effort max --stream --max-turns none --timeout-ms none
 ```
 
+The same delegation pattern works with zcode workers; the provider is
+remembered per named agent:
+
+```powershell
+runmux once zscout "只读采集指定协议样本；不要设计方案，不要修改文件；输出证据和文件位置" --cwd "D:\path\to\repo" --provider zcode --stream --timeout-ms none
+runmux ask zworker "只实现已定义的 changes[] 生成模块；不得修改数据库结构；不要提交；按给定验收项自测" --cwd "D:\path\to\repo" --provider zcode --yolo --stream --timeout-ms none
+```
+
 With `--stream`, stdout is the provider's unmodified JSONL event stream and
 RunMux diagnostics use stderr. Select the event parser by agent/provider type.
 Do not combine `--stream` with `--json`.
@@ -73,10 +91,10 @@ Do not combine `--stream` with `--json`.
 ## Safety
 
 - Default to RunMux read-only mode for research, reviews, and second opinions.
-- Use `--yolo` only when the user explicitly authorizes Claude Code to modify files.
+- Use `--yolo` only when the user explicitly authorizes the provider to modify files. For zcode this maps to `--mode yolo`; the safe default maps to read-only `--mode plan`.
 - Scope coding prompts tightly and include `Do not commit` unless the user requested a commit.
-- Do not run main-agent and CC edits against the same files concurrently.
-- Never accept CC's self-reported success as verification.
+- Do not run main-agent and worker edits against the same files concurrently.
+- Never accept a worker's self-reported success as verification.
 - After every coding run, inspect the diff and execute appropriate verification yourself.
 - Use `--safe` to return a persisted agent to read-only mode.
 
@@ -94,7 +112,7 @@ Adversarial commands are read-only. Run any authorized coding task separately wi
 
 ## Runtime and State
 
-Use `--runtime wsl` only when Claude Code should run inside WSL. Windows is the default and automatically resolves native and npm installations.
+Use `--runtime wsl` only when Claude Code should run inside WSL. Windows is the default and automatically resolves native and npm installations. The zcode provider supports the Windows runtime only.
 
 RunMux stores named sessions and logs under `~/.runmux`. Logs may contain prompts and model output; never publish them.
 

@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RunMux 控制台</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --card: #ffffff; --text: #1c2128; --muted: #6a737d;
+  --line: #d8dee4; --accent: #0b62d6; --ok: #1a7f37; --err: #cf222e; --code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e; --line: #30363d; --accent: #4493f8; --ok: #3fb950; --err: #f85149; --code: #21262d; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--text); font: 14px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+main { max-width: 920px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; word-break: break-all; }
+section.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
+h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+h2 .tag { font-size: 11px; color: var(--muted); font-weight: 400; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.tabs button { background: transparent; border: 1px solid var(--line); color: var(--text); border-radius: 99px; padding: 4px 14px; }
+.tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.model-now { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; padding: 10px 12px; background: var(--code); border-radius: 8px; margin-bottom: 12px; }
+.model-now .ref { font-family: ui-monospace, Consolas, monospace; font-size: 15px; font-weight: 600; }
+.chip { display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 99px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+select, input, button, textarea { font: inherit; color: inherit; }
+select, input, textarea { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+select { min-width: 320px; max-width: 100%; }
+input[list] { min-width: 320px; }
+button { background: var(--accent); border: none; color: #fff; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+button.secondary { background: transparent; border: 1px solid var(--line); color: var(--text); }
+button:disabled { opacity: .5; cursor: default; }
+.status { font-size: 12px; margin-top: 8px; min-height: 18px; word-break: break-all; }
+.status.ok { color: var(--ok); }
+.status.err { color: var(--err); }
+details { border: 1px solid var(--line); border-radius: 8px; margin-top: 14px; }
+details summary { cursor: pointer; padding: 10px 12px; font-weight: 600; font-size: 13px; }
+form { padding: 4px 12px 14px; display: grid; gap: 10px; }
+label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+label.wide { grid-column: 1 / -1; }
+label input, label select, label textarea { width: 100%; color: var(--text); }
+label.chk { display: flex; gap: 6px; align-items: center; color: var(--text); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+.logbox { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.logentry { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.logentry:last-child { border-bottom: none; }
+.logentry .meta { color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.logentry pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.exit0 { color: var(--ok); }
+.exitx { color: var(--err); }
+.hint { color: var(--muted); font-size: 12px; }
+footer { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>RunMux 控制台</h1>
+  <div class="sub" id="sub">加载中…</div>
+
+  <section class="card">
+    <h2>模型配置 <span class="tag" id="config-tag"></span></h2>
+    <div class="tabs" id="provider-tabs" role="tablist"></div>
+    <div id="config-hint" class="hint" style="margin-bottom:10px;"></div>
+    <div id="config-missing" class="hint" hidden></div>
+    <div id="model-now" class="model-now"></div>
+
+    <div class="row" id="model-select-row">
+      <select id="model-ref" hidden></select>
+      <input id="model-input" list="model-suggestions" placeholder="例如 opus 或 sonnet[1m]，default 恢复默认" hidden>
+      <datalist id="model-suggestions"></datalist>
+      <button id="apply-model" disabled>应用</button>
+      <button id="reset-model" class="secondary" hidden>恢复默认</button>
+    </div>
+    <div id="model-status" class="status"></div>
+
+    <details id="provider-upsert" hidden>
+      <summary>新增 / 更新模型来源（provider）</summary>
+      <form id="provider-form">
+        <div class="grid2">
+          <label>provider id（不含 /）
+            <input id="p-id" placeholder="commandcode" required>
+          </label>
+          <label>显示名称（可选）
+            <input id="p-name" placeholder="CommandCode">
+          </label>
+          <label>kind
+            <select id="p-kind">
+              <option value="openai-compatible">openai-compatible（OpenAI 兼容接口）</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+            </select>
+          </label>
+          <label>baseURL
+            <input id="p-base" placeholder="https://api.example.com/v1" required>
+          </label>
+        </div>
+        <label class="wide">API Key（更新已有 provider 时可留空表示保留原值）
+          <input id="p-key" type="password" placeholder="sk-..." autocomplete="off">
+        </label>
+        <label class="wide">模型 id（每行一个，可含 /，例如 deepseek/deepseek-v4.1-flash）
+          <textarea id="p-models" rows="3" placeholder="deepseek/deepseek-v4.1-flash"></textarea>
+        </label>
+        <label class="chk"><input type="checkbox" id="p-main"> 保存后把该 provider 的第一个模型设为当前模型</label>
+        <div class="row">
+          <button type="submit">保存 provider</button>
+          <span class="hint">写入前自动备份原配置（.bak-ui-时间戳）。</span>
+        </div>
+      </form>
+    </details>
+    <div id="provider-status" class="status"></div>
+  </section>
+
+  <section class="card">
+    <h2>Agents <span class="tag">命名会话状态（~/.runmux）</span></h2>
+    <table>
+      <thead>
+        <tr><th>名称</th><th>provider</th><th>session</th><th>模式</th><th>更新时间</th><th></th></tr>
+      </thead>
+      <tbody id="agents-body"></tbody>
+    </table>
+    <div id="logbox" class="logbox" hidden></div>
+    <div id="agents-status" class="status"></div>
+  </section>
+
+  <footer id="footer"></footer>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+));
+let token = "";
+let providers = [];
+let activeProvider = null;
+let activeConfig = null;
+
+async function api(pathname, options = {}) {
+  const res = await fetch(pathname, {
+    ...options,
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { "x-runmux-token": token } : {}),
+      ...(options.headers || {})
+    }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function setStatus(id, text, kind) {
+  const el = $(id);
+  el.textContent = text || "";
+  el.className = "status" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
+}
+
+function renderTabs() {
+  const tabs = $("provider-tabs");
+  tabs.innerHTML = "";
+  for (const provider of providers) {
+    const button = document.createElement("button");
+    button.textContent = provider.label;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", provider.id === activeProvider ? "true" : "false");
+    button.addEventListener("click", () => {
+      if (activeProvider !== provider.id) {
+        activeProvider = provider.id;
+        setStatus("model-status", "");
+        setStatus("provider-status", "");
+        loadConfig().catch((error) => setStatus("model-status", error.message, "err"));
+      }
+    });
+    tabs.appendChild(button);
+  }
+}
+
+function renderConfig(config) {
+  activeConfig = config;
+  const meta = providers.find((entry) => entry.id === config.provider) || {};
+  $("config-tag").textContent = config.configPath || "";
+  $("config-hint").textContent = meta.description || "";
+
+  $("config-missing").hidden = Boolean(config.exists);
+  $("config-missing").textContent = config.exists
+    ? ""
+    : "未找到配置文件。zcode 可以先在下方新增一个 provider（保存时会自动创建配置）；其他 provider 请先完成各自的安装与登录。";
+
+  const main = config.model && config.model.main;
+  const providerOf = (config.providers || []).find((p) => main && main.startsWith(p.id + "/"));
+  const keyChip = providerOf
+    ? providerOf.apiKeySet === true
+      ? `key: ${providerOf.apiKeyMasked}`
+      : providerOf.apiKeySet === false
+        ? "key: 未设置"
+        : providerOf.apiKeyEnv
+          ? `key: env ${providerOf.apiKeyEnv}`
+          : ""
+    : "";
+  const chips = [
+    providerOf && providerOf.kind ? `<span class="chip">${esc(providerOf.kind)}</span>` : "",
+    providerOf && providerOf.baseURL ? `<span class="chip">${esc(providerOf.baseURL)}</span>` : "",
+    keyChip ? `<span class="chip">${esc(keyChip)}</span>` : "",
+    config.effortLevel ? `<span class="chip">effort: ${esc(config.effortLevel)}</span>` : "",
+    config.authConfigured === false ? `<span class="chip">未检测到认证配置</span>` : "",
+    config.reasoningLevel ? `<span class="chip">思考等级: ${esc(config.reasoningLevel)}（在 zcode TUI 中调整）</span>` : ""
+  ].filter(Boolean).join("");
+  $("model-now").innerHTML = main
+    ? `<span class="ref">${esc(main)}</span>${chips}`
+    : `<span class="hint">当前使用 provider 默认模型</span>${chips}`;
+
+  const hasSelect = (config.providers || []).some((p) => p.models.length);
+  const select = $("model-ref");
+  const input = $("model-input");
+  const datalist = $("model-suggestions");
+  select.hidden = !hasSelect;
+  input.hidden = hasSelect;
+  $("reset-model").hidden = hasSelect || !config.exists;
+  select.innerHTML = "";
+  datalist.innerHTML = "";
+  if (hasSelect) {
+    for (const provider of config.providers || []) {
+      if (!provider.models.length) continue;
+      const group = document.createElement("optgroup");
+      group.label = `${provider.id}（${provider.kind || "?"}）`;
+      for (const model of provider.models) {
+        const option = document.createElement("option");
+        const value = `${provider.id}/${model}`;
+        option.value = value;
+        option.textContent = value;
+        if (value === main) option.selected = true;
+        group.appendChild(option);
+      }
+      select.appendChild(group);
+    }
+  } else {
+    for (const suggestion of meta.modelSuggestions || []) {
+      const option = document.createElement("option");
+      option.value = suggestion;
+      datalist.appendChild(option);
+    }
+    input.value = main || "";
+  }
+  $("apply-model").disabled = false;
+
+  $("provider-upsert").hidden = !config.supportsUpsert;
+}
+
+async function loadConfig() {
+  const config = await api(`/api/model-config?provider=${encodeURIComponent(activeProvider)}`);
+  renderConfig(config);
+  return config;
+}
+
+async function loadAgents() {
+  const payload = await api("/api/agents");
+  const body = $("agents-body");
+  body.innerHTML = "";
+  const agents = payload.agents || [];
+  if (!agents.length) {
+    body.innerHTML = `<tr><td colspan="6" class="hint">暂无命名 agent。用 runmux ask 创建。</td></tr>`;
+    return payload;
+  }
+  for (const agent of agents) {
+    const tr = document.createElement("tr");
+    const mode = agent.yolo ? "yolo（可写）" : "只读";
+    tr.innerHTML = `
+      <td class="mono">${esc(agent.name)}</td>
+      <td>${esc(agent.provider || "claude")}</td>
+      <td class="mono">${esc(agent.sessionId || "-")}</td>
+      <td>${esc(mode)}</td>
+      <td>${esc(agent.updatedAt || "-")}</td>
+      <td><button class="secondary" data-agent="${esc(agent.name)}">最近日志</button></td>`;
+    body.appendChild(tr);
+  }
+  for (const button of body.querySelectorAll("button[data-agent]")) {
+    button.addEventListener("click", () => loadLogs(button.dataset.agent));
+  }
+  return payload;
+}
+
+async function loadLogs(agent) {
+  try {
+    setStatus("agents-status", `正在读取 ${agent} 的日志…`);
+    const payload = await api(`/api/logs?agent=${encodeURIComponent(agent)}&limit=5`);
+    const box = $("logbox");
+    box.hidden = false;
+    if (!payload.entries.length) {
+      box.innerHTML = `<div class="logentry"><span class="hint">没有找到 ${esc(agent)} 的运行日志。</span></div>`;
+    } else {
+      box.innerHTML = `<div class="logentry"><strong>最近运行：${esc(agent)}</strong></div>` + payload.entries.map((entry) => {
+        const exitClass = entry.exitCode === 0 ? "exit0" : "exitx";
+        return `<div class="logentry">
+          <div class="meta">
+            <span>${esc(entry.startedAt || "")}</span>
+            <span class="${exitClass}">退出码 ${esc(entry.exitCode ?? "?")}</span>
+            <span>${esc(entry.provider || "")}</span>
+            <span>${esc(entry.sessionId || "")}</span>
+          </div>
+          <div><span class="hint">Prompt：</span>${esc(String(entry.prompt || "").slice(0, 300))}</div>
+          <pre>${esc(entry.result || "(无输出)")}</pre>
+        </div>`;
+      }).join("");
+    }
+    setStatus("agents-status", "");
+  } catch (error) {
+    setStatus("agents-status", error.message, "err");
+  }
+}
+
+async function init() {
+  try {
+    token = (await api("/api/token")).token;
+    providers = (await api("/api/providers")).providers;
+    activeProvider = providers.length ? providers[0].id : null;
+    renderTabs();
+    const [config, agents] = await Promise.all([activeProvider ? loadConfig() : Promise.resolve(null), loadAgents()]);
+    $("sub").textContent = "本地控制台 · 仅监听 127.0.0.1 · 写操作需页面令牌";
+    $("footer").textContent = [
+      config && config.configPath ? `${config.label}: ${config.configPath}` : "",
+      agents.statePath ? `状态文件: ${agents.statePath}` : ""
+    ].filter(Boolean).join(" · ");
+  } catch (error) {
+    $("sub").textContent = `加载失败：${error.message}`;
+  }
+}
+
+$("apply-model").addEventListener("click", async () => {
+  if (!activeProvider) return;
+  const hasSelect = !$("model-ref").hidden;
+  const value = hasSelect ? $("model-ref").value : $("model-input").value.trim();
+  if (!hasSelect && !value) {
+    setStatus("model-status", "请输入模型名。", "err");
+    return;
+  }
+  $("apply-model").disabled = true;
+  try {
+    setStatus("model-status", "正在写入…");
+    const config = await api("/api/model", {
+      method: "POST",
+      body: JSON.stringify({ provider: activeProvider, model: value })
+    });
+    renderConfig(config);
+    setStatus("model-status", `已保存（原配置已备份为 .bak-ui-时间戳）。`, "ok");
+  } catch (error) {
+    setStatus("model-status", error.message, "err");
+  } finally {
+    $("apply-model").disabled = false;
+  }
+});
+
+$("reset-model").addEventListener("click", async () => {
+  if (!activeProvider) return;
+  try {
+    setStatus("model-status", "正在恢复默认…");
+    const config = await api("/api/model", {
+      method: "POST",
+      body: JSON.stringify({ provider: activeProvider, model: "default" })
+    });
+    renderConfig(config);
+    setStatus("model-status", "已恢复 provider 默认模型（原配置已备份）。", "ok");
+  } catch (error) {
+    setStatus("model-status", error.message, "err");
+  }
+});
+
+$("provider-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    provider: activeProvider,
+    id: $("p-id").value,
+    name: $("p-name").value,
+    kind: $("p-kind").value,
+    baseURL: $("p-base").value,
+    apiKey: $("p-key").value,
+    models: $("p-models").value,
+    setMain: $("p-main").checked
+  };
+  try {
+    setStatus("provider-status", "正在写入…");
+    const config = await api("/api/provider", { method: "POST", body: JSON.stringify(payload) });
+    renderConfig(config);
+    setStatus("provider-status", `provider ${payload.id} 已保存（原配置已备份）。`, "ok");
+    $("p-key").value = "";
+  } catch (error) {
+    setStatus("provider-status", error.message, "err");
+  }
+});
+
+init();
+</script>
+</body>
+</html>

@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +27,10 @@ const defaultTimeoutMs = 600000;
 const legacyDefaultMaxTurns = "6";
 const unlimitedLimitValues = new Set(["0", "none", "unlimited"]);
 const supportedEffortLevels = new Set(["low", "medium", "high", "xhigh", "max"]);
+const supportedProviders = new Set(["claude", "zcode"]);
+const zcodeSafeMode = "plan";
+const zcodeYoloMode = "yolo";
+const zcodeRequiredHelpFlags = ["--prompt", "--mode", "--resume", "--disallowedTools", "--cwd"];
 const legacyDefaultAllowedTools = "Read,Grep,Glob,LS";
 const legacyDefaultPermissionMode = "plan";
 const readOnlyAppendSystemPromptWindows = [
@@ -82,6 +86,9 @@ async function main() {
       break;
     case "transcript":
       await transcript(args);
+      break;
+    case "ui":
+      await runUi(args);
       break;
     case "list":
       await listAgents();
@@ -164,7 +171,8 @@ async function smoke(commandArgs) {
   const probeFile = values.probeFile || "README.md";
   const expectedStatus = existsSync(path.join(cwd, probeFile)) ? "存在" : "不存在";
   const agentName = values.agent || "__smoke__";
-  const prompt = `这是 Claude Code 子 agent 连通性 smoke 测试。请只做只读检查，不要修改文件。
+  const provider = resolveProviderId(values.provider);
+  const prompt = `这是 ${providerLabel(provider)} 子 agent 连通性 smoke 测试。请只做只读检查，不要修改文件。
 
 请检查当前工作目录下的 ${probeFile} 是否存在，并严格只输出下面两行：
 RUNMUX_SMOKE_OK
@@ -517,22 +525,25 @@ async function health(commandArgs) {
   }
 
   const healthRuntime = values.runtime ?? process.env.RUNMUX_RUNTIME ?? "windows";
-  const healthRuntimeConfig = await resolveRuntimeConfig(healthRuntime, values, null, __dirname);
+  const healthProvider = resolveProviderId(values.provider);
+  const healthRuntimeConfig = await resolveRuntimeConfig(healthRuntime, values, null, __dirname, healthProvider);
   checks.push(okCheck("runtime", healthRuntimeConfig.runtime === "wsl"
     ? `wsl user=${healthRuntimeConfig.wslUser || "default"} distro=${healthRuntimeConfig.wslDistro || "default"}`
     : "windows"));
 
-  const versionInvocation = buildClaudeInvocation(healthRuntimeConfig, ["--version"]);
-  const claudeVersion = await runProcess(versionInvocation.command, versionInvocation.args, versionInvocation.cwd);
-  checks.push(claudeVersion.exitCode === 0
-    ? okCheck("claude --version", (claudeVersion.stdout || claudeVersion.stderr).trim())
-    : failCheck("claude --version", claudeVersion.stderr.trim() || "无法执行 claude"));
+  const versionInvocation = buildProviderInvocation(healthProvider, healthRuntimeConfig, ["--version"]);
+  const providerVersion = await runProcess(versionInvocation.command, versionInvocation.args, versionInvocation.cwd);
+  checks.push(providerVersion.exitCode === 0
+    ? okCheck(`${healthProvider} --version`, (providerVersion.stdout || providerVersion.stderr).trim())
+    : failCheck(`${healthProvider} --version`, providerVersion.stderr.trim() || `无法执行 ${healthProvider}`));
 
-  const helpInvocation = buildClaudeInvocation(healthRuntimeConfig, ["--help"]);
-  const claudeHelp = await runProcess(helpInvocation.command, helpInvocation.args, helpInvocation.cwd);
-  if (claudeHelp.exitCode === 0) {
-    const helpText = `${claudeHelp.stdout}\n${claudeHelp.stderr}`;
-    const requiredFlags = [
+  const helpInvocation = buildProviderInvocation(healthProvider, healthRuntimeConfig, ["--help"]);
+  const providerHelp = await runProcess(helpInvocation.command, helpInvocation.args, helpInvocation.cwd);
+  if (providerHelp.exitCode === 0) {
+    const helpText = `${providerHelp.stdout}\n${providerHelp.stderr}`;
+    const requiredFlags = healthProvider === "zcode"
+      ? zcodeRequiredHelpFlags
+      : [
       "-p",
       "--output-format",
       "--verbose",
@@ -549,10 +560,10 @@ async function health(commandArgs) {
     ];
     const missing = requiredFlags.filter((flag) => !helpText.includes(flag));
     checks.push(missing.length
-      ? failCheck("claude flags", `缺少参数：${missing.join(", ")}`)
-      : okCheck("claude flags", "当前 wrapper 需要的参数可用"));
+      ? failCheck(`${healthProvider} flags`, `缺少参数：${missing.join(", ")}`)
+      : okCheck(`${healthProvider} flags`, "当前 wrapper 需要的参数可用"));
   } else {
-    checks.push(failCheck("claude --help", claudeHelp.stderr.trim() || "无法读取 help"));
+    checks.push(failCheck(`${healthProvider} --help`, providerHelp.stderr.trim() || "无法读取 help"));
   }
 
   if (skillDir && existsSync(path.join(skillDir, "SKILL.md"))) {
@@ -583,6 +594,44 @@ async function health(commandArgs) {
   if (failed) {
     process.exitCode = 1;
   }
+}
+
+async function runUi(commandArgs) {
+  let port = 8788;
+  let open = true;
+  for (let i = 0; i < commandArgs.length; i += 1) {
+    const arg = commandArgs[i];
+    if (arg === "--port") {
+      port = Number.parseInt(commandArgs[++i], 10);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        throw new Error("--port 必须是 0-65535 的整数（0 表示随机端口）。");
+      }
+    } else if (arg === "--no-open") {
+      open = false;
+    } else if (arg === "--help" || arg === "-h") {
+      printUiHelp();
+      return;
+    } else {
+      throw new Error(`未知选项：${arg}。执行 runmux ui --help 查看用法。`);
+    }
+  }
+
+  const { startUiServer } = await import(pathToFileURL(path.join(__dirname, "ui", "ui-server.mjs")).href);
+  const ui = await startUiServer({ port, open });
+  console.error(`[runmux] Web 控制台已启动：${ui.url}`);
+  console.error("[runmux] 仅监听 127.0.0.1；写操作需要页面令牌；Ctrl+C 退出。");
+  await new Promise(() => {});
+}
+
+function printUiHelp() {
+  console.log(`用法：
+  runmux ui [--port <n>] [--no-open]
+
+说明：
+  启动本地 Web 控制台：查看/切换 zcode、Claude Code、DSH 的默认模型，
+  引导式新增 zcode provider（自动备份原配置），并查看命名 agent 状态与最近运行日志。
+  --port 默认 8788，被占用时自动顺延；传 0 使用随机端口。
+  --no-open 不自动打开浏览器。`);
 }
 
 async function transcript(commandArgs) {
@@ -647,6 +696,8 @@ async function runAsk(agentName, prompt, values) {
   }
 
   const previousConfig = values.ignorePreviousConfig ? null : previous;
+  const provider = resolveProviderId(values.provider ?? previousConfig?.provider);
+  const previousProviderConfig = (previousConfig?.provider ?? "claude") === provider ? previousConfig : null;
   const previousPermissionMode = previousConfig?.permissionMode === legacyDefaultPermissionMode
     ? defaultPermissionMode
     : previousConfig?.permissionMode;
@@ -670,51 +721,46 @@ async function runAsk(agentName, prompt, values) {
     values.timeoutMs ?? previousConfig?.timeoutMs ?? defaultTimeoutMs,
     "timeout-ms"
   );
-  const runtimeConfig = await resolveRuntimeConfig(runtime, values, previousConfig, cwd);
+  const runtimeConfig = await resolveRuntimeConfig(runtime, values, previousProviderConfig, cwd, provider);
   const shouldResume = previous?.sessionId && !values.fresh;
 
-  const claudeArgs = ["-p", prompt, ...getClaudeOutputArgs(values.stream)];
-  if (maxTurns !== "0") {
-    claudeArgs.push("--max-turns", maxTurns);
-  }
-
-  claudeArgs.push("--name", agentName);
-  if (shouldResume) {
-    claudeArgs.push("--resume", previous.sessionId);
-  }
-  if (yolo) {
-    claudeArgs.push("--dangerously-skip-permissions");
-  } else if (permissionMode && permissionMode !== "none") {
-    claudeArgs.push("--permission-mode", permissionMode);
-  }
-  if (cliAllowedTools && cliAllowedTools !== "none") {
-    claudeArgs.push("--allowedTools", cliAllowedTools);
-  }
-  if (disallowedTools) {
-    claudeArgs.push("--disallowedTools", disallowedTools);
-  }
-  if (values.mcpConfig) {
-    claudeArgs.push("--mcp-config", path.resolve(values.mcpConfig));
-  }
-  if (values.systemPrompt) {
-    claudeArgs.push("--system-prompt", values.systemPrompt);
-  }
-  if (values.appendSystemPrompt || !yolo) {
-    const appendPrompt = [!yolo ? getReadOnlyAppendSystemPrompt(runtimeConfig.runtime) : "", values.appendSystemPrompt || ""]
-      .filter(Boolean)
-      .join("\n\n");
-    claudeArgs.push("--append-system-prompt", appendPrompt);
-  }
-  if (values.model) {
-    claudeArgs.push("--model", values.model);
-  }
-  if (effort) {
-    claudeArgs.push("--effort", effort);
+  const unsupportedNotes = [];
+  const providerArgs = provider === "zcode"
+    ? buildZcodeRunArgs({
+        prompt,
+        values,
+        stream: Boolean(values.stream),
+        yolo,
+        shouldResume,
+        previousSessionId: previous?.sessionId,
+        disallowedTools,
+        maxTurns,
+        effort,
+        cwd,
+        notes: unsupportedNotes
+      })
+    : buildClaudeRunArgs({
+        agentName,
+        prompt,
+        values,
+        stream: Boolean(values.stream),
+        yolo,
+        permissionMode,
+        maxTurns,
+        shouldResume,
+        previousSessionId: previous?.sessionId,
+        cliAllowedTools,
+        disallowedTools,
+        effort,
+        runtimeConfig
+      });
+  for (const note of unsupportedNotes) {
+    console.error(`[runmux] ${note}`);
   }
 
   await mkdir(logDir, { recursive: true });
   const startedAt = new Date();
-  const invocation = buildClaudeInvocation(runtimeConfig, claudeArgs);
+  const invocation = buildProviderInvocation(provider, runtimeConfig, providerArgs);
   const run = await runProcess(invocation.command, invocation.args, invocation.cwd, values.stream
     ? {
         timeoutMs,
@@ -723,6 +769,7 @@ async function runAsk(agentName, prompt, values) {
       }
     : { timeoutMs });
   const logPath = await writeRunLog(agentName, startedAt, {
+    provider,
     command: invocation.command,
     args: maskArgs(invocation.args),
     cwd: invocation.cwd,
@@ -735,20 +782,22 @@ async function runAsk(agentName, prompt, values) {
   });
 
   const payload = parseProviderPayload(run.stdout, values.stream);
+  const label = providerLabel(provider);
 
   if (run.exitCode !== 0) {
     const stderrDetail = values.stream ? "" : `\n${run.stderr.trim()}`;
-    throw new Error(`Claude Code 执行失败，退出码 ${run.exitCode}。\n日志：${logPath}${stderrDetail}`);
+    throw new Error(`${label} 执行失败，退出码 ${run.exitCode}。\n日志：${logPath}${stderrDetail}`);
   }
 
   if (!payload) {
-    throw new Error(`Claude Code 没有返回可解析 JSON。\n日志：${logPath}`);
+    throw new Error(`${label} 没有返回可解析 JSON。\n日志：${logPath}`);
   }
 
   const sessionId = extractSessionId(payload) || previous?.sessionId;
   if (values.persistState !== false) {
     state.agents[agentName] = {
       name: agentName,
+      provider,
       cwd,
       sessionId,
       runtime: runtimeConfig.runtime,
@@ -757,12 +806,16 @@ async function runAsk(agentName, prompt, values) {
       timeoutMs,
       allowedTools: storedAllowedTools,
       disallowedTools,
-      claudeCommand: runtimeConfig.claudeCommand,
-      wslUser: runtimeConfig.wslUser,
-      wslDistro: runtimeConfig.wslDistro,
-      wslExe: runtimeConfig.wslExe,
-      wslClaude: runtimeConfig.wslClaude,
-      wslClaudePath: runtimeConfig.wslClaudePath,
+      ...(provider === "zcode"
+        ? { zcodeCommand: runtimeConfig.zcodeCommand }
+        : {
+            claudeCommand: runtimeConfig.claudeCommand,
+            wslUser: runtimeConfig.wslUser,
+            wslDistro: runtimeConfig.wslDistro,
+            wslExe: runtimeConfig.wslExe,
+            wslClaude: runtimeConfig.wslClaude,
+            wslClaudePath: runtimeConfig.wslClaudePath
+          }),
       yolo,
       createdAt: previous?.createdAt || startedAt.toISOString(),
       updatedAt: new Date().toISOString(),
@@ -774,6 +827,7 @@ async function runAsk(agentName, prompt, values) {
 
   return {
     agentName,
+    provider,
     payload,
     result: extractResult(payload) || JSON.stringify(payload, null, 2),
     sessionId,
@@ -783,9 +837,10 @@ async function runAsk(agentName, prompt, values) {
 }
 
 function printAskAnswer(answer, values) {
+  const label = providerLabel(answer.provider);
   if (values.stream) {
     if (answer.yolo) {
-      console.error("\n[runmux] YOLO 已启用：Claude Code 可以跳过权限确认并修改文件。");
+      console.error(`\n[runmux] YOLO 已启用：${label} 可以跳过权限确认并修改文件。`);
     }
     console.error(`\n[runmux] agent=${answer.agentName} session=${answer.sessionId || "未返回"} log=${answer.logPath}`);
     return;
@@ -799,7 +854,7 @@ function printAskAnswer(answer, values) {
   console.log(answer.result);
 
   if (answer.yolo) {
-    console.error("\n[runmux] YOLO 已启用：Claude Code 可以跳过权限确认并修改文件。");
+    console.error(`\n[runmux] YOLO 已启用：${label} 可以跳过权限确认并修改文件。`);
   }
   console.error(`\n[runmux] agent=${answer.agentName} session=${answer.sessionId || "未返回"} log=${answer.logPath}`);
 }
@@ -822,7 +877,7 @@ async function listAgents() {
   }
 
   for (const item of rows) {
-    console.log(`${item.name}\t${item.sessionId || "-"}\t${item.permissionMode || "-"}\t${item.cwd}\t${item.updatedAt || "-"}`);
+    console.log(`${item.name}\t${item.provider || "claude"}\t${item.sessionId || "-"}\t${item.permissionMode || "-"}\t${item.cwd}\t${item.updatedAt || "-"}`);
   }
 }
 
@@ -969,6 +1024,8 @@ function normalizeOptionName(name) {
     "wsl-distro": "wslDistro",
     "wsl-exe": "wslExe",
     "wsl-claude": "wslClaude",
+    provider: "provider",
+    zcode: "zcode",
     "mcp-config": "mcpConfig",
     system: "systemPrompt",
     "system-prompt": "systemPrompt",
@@ -1037,23 +1094,39 @@ function normalizeStoredMaxTurns(maxTurns) {
   return String(maxTurns ?? "") === legacyDefaultMaxTurns ? defaultMaxTurns : maxTurns;
 }
 
-async function resolveWindowsClaudeCommand(requestedCommand, includeDefaults) {
-  const requested = String(requestedCommand || "claude").trim() || "claude";
+const claudeWindowsCommandOptions = {
+  defaultCommand: "claude",
+  label: "Claude Code",
+  hint: "请确认已安装 Claude Code，或使用 --claude 指定原生可执行文件。",
+  defaultCandidates: defaultWindowsClaudeCommandCandidates,
+  packageName: "@anthropic-ai/claude-code",
+  binName: "claude"
+};
+
+const zcodeWindowsCommandOptions = {
+  defaultCommand: "zcode",
+  label: "zcode",
+  hint: "请确认已安装 zcode-app-cli，或使用 --zcode 指定可执行文件。",
+  defaultCandidates: defaultWindowsZcodeCommandCandidates,
+  packageName: "zcode-app-cli",
+  binName: "zcode"
+};
+
+async function resolveWindowsProviderCommand(requestedCommand, includeDefaults, options) {
+  const requested = String(requestedCommand || options.defaultCommand).trim() || options.defaultCommand;
   const candidates = collectWindowsCommandCandidates(requested);
   if (includeDefaults) {
-    candidates.push(...defaultWindowsClaudeCommandCandidates());
+    candidates.push(...options.defaultCandidates());
   }
 
   for (const candidate of uniquePaths(candidates)) {
-    const spawnable = await resolveWindowsSpawnableClaudeCommand(candidate);
+    const spawnable = await resolveWindowsSpawnablePackageCommand(candidate, options);
     if (spawnable && await commandReportsVersion(spawnable)) {
       return spawnable;
     }
   }
 
-  throw new Error(
-    `Windows 中未找到可直接启动的 Claude Code。请确认已安装 Claude Code，或使用 --claude 指定原生可执行文件。`
-  );
+  throw new Error(`Windows 中未找到可直接启动的 ${options.label}。${options.hint}`);
 }
 
 function collectWindowsCommandCandidates(command) {
@@ -1102,6 +1175,16 @@ function defaultWindowsClaudeCommandCandidates() {
   return candidates;
 }
 
+function defaultWindowsZcodeCommandCandidates() {
+  const candidates = [];
+  const appData = process.env.APPDATA || (homeDir ? path.join(homeDir, "AppData", "Roaming") : "");
+  if (appData) {
+    candidates.push(path.join(appData, "npm", "zcode.cmd"));
+    candidates.push(path.join(appData, "npm", "node_modules", "zcode-app-cli", "bin", "zcode.js"));
+  }
+  return candidates;
+}
+
 function uniquePaths(candidates) {
   const seen = new Set();
   return candidates.filter((candidate) => {
@@ -1114,7 +1197,7 @@ function uniquePaths(candidates) {
   });
 }
 
-async function resolveWindowsSpawnableClaudeCommand(candidate) {
+async function resolveWindowsSpawnablePackageCommand(candidate, options) {
   if (!existsSync(candidate)) {
     return null;
   }
@@ -1130,12 +1213,11 @@ async function resolveWindowsSpawnableClaudeCommand(candidate) {
   const packageDirectory = path.join(
     path.dirname(candidate),
     "node_modules",
-    "@anthropic-ai",
-    "claude-code"
+    options.packageName
   );
   try {
     const manifest = JSON.parse(await readFile(path.join(packageDirectory, "package.json"), "utf8"));
-    const binEntry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.claude;
+    const binEntry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[options.binName];
     if (typeof binEntry !== "string" || !binEntry.trim()) {
       return null;
     }
@@ -1158,17 +1240,38 @@ async function commandReportsVersion(command) {
   }
 }
 
-async function resolveRuntimeConfig(runtime, values, previousConfig, cwd) {
+async function resolveRuntimeConfig(runtime, values, previousConfig, cwd, provider = "claude") {
   if (runtime !== "windows" && runtime !== "wsl") {
     throw new Error(`不支持的 runtime：${runtime}。可用值：windows, wsl`);
   }
+  if (provider === "zcode" && runtime === "wsl") {
+    throw new Error("zcode provider 暂只支持 windows runtime。");
+  }
 
   if (runtime === "windows") {
+    if (provider === "zcode") {
+      const explicitZcodeCommand = values.zcode ?? process.env.RUNMUX_ZCODE;
+      const requestedZcodeCommand = explicitZcodeCommand ?? previousConfig?.zcodeCommand ?? "zcode";
+      const zcodeCommand = await resolveWindowsProviderCommand(
+        requestedZcodeCommand,
+        explicitZcodeCommand === undefined,
+        zcodeWindowsCommandOptions
+      );
+      return {
+        runtime: "windows",
+        provider: "zcode",
+        zcodeCommand,
+        command: zcodeCommand,
+        cwd
+      };
+    }
+
     const explicitClaudeCommand = values.claude ?? process.env.RUNMUX_CLAUDE;
     const requestedClaudeCommand = explicitClaudeCommand ?? previousConfig?.claudeCommand ?? "claude";
-    const claudeCommand = await resolveWindowsClaudeCommand(
+    const claudeCommand = await resolveWindowsProviderCommand(
       requestedClaudeCommand,
-      explicitClaudeCommand === undefined
+      explicitClaudeCommand === undefined,
+      claudeWindowsCommandOptions
     );
     return {
       runtime: "windows",
@@ -1226,6 +1329,128 @@ function buildClaudeInvocation(runtimeConfig, claudeArgs) {
     ],
     cwd: runtimeConfig.cwd
   };
+}
+
+function resolveProviderId(value) {
+  const provider = String(value || process.env.RUNMUX_PROVIDER || "claude").trim().toLowerCase();
+  if (!supportedProviders.has(provider)) {
+    throw new Error(`--provider 仅支持 ${[...supportedProviders].join(" 或 ")}。`);
+  }
+  return provider;
+}
+
+function providerLabel(provider) {
+  return provider === "zcode" ? "zcode" : "Claude Code";
+}
+
+function buildProviderInvocation(provider, runtimeConfig, providerArgs) {
+  if (provider === "zcode") {
+    return {
+      command: runtimeConfig.command,
+      args: providerArgs,
+      cwd: runtimeConfig.cwd
+    };
+  }
+  return buildClaudeInvocation(runtimeConfig, providerArgs);
+}
+
+function buildClaudeRunArgs({
+  agentName,
+  prompt,
+  values,
+  stream,
+  yolo,
+  permissionMode,
+  maxTurns,
+  shouldResume,
+  previousSessionId,
+  cliAllowedTools,
+  disallowedTools,
+  effort,
+  runtimeConfig
+}) {
+  const claudeArgs = ["-p", prompt, ...getClaudeOutputArgs(stream)];
+  if (maxTurns !== "0") {
+    claudeArgs.push("--max-turns", maxTurns);
+  }
+
+  claudeArgs.push("--name", agentName);
+  if (shouldResume) {
+    claudeArgs.push("--resume", previousSessionId);
+  }
+  if (yolo) {
+    claudeArgs.push("--dangerously-skip-permissions");
+  } else if (permissionMode && permissionMode !== "none") {
+    claudeArgs.push("--permission-mode", permissionMode);
+  }
+  if (cliAllowedTools && cliAllowedTools !== "none") {
+    claudeArgs.push("--allowedTools", cliAllowedTools);
+  }
+  if (disallowedTools) {
+    claudeArgs.push("--disallowedTools", disallowedTools);
+  }
+  if (values.mcpConfig) {
+    claudeArgs.push("--mcp-config", path.resolve(values.mcpConfig));
+  }
+  if (values.systemPrompt) {
+    claudeArgs.push("--system-prompt", values.systemPrompt);
+  }
+  if (values.appendSystemPrompt || !yolo) {
+    const appendPrompt = [!yolo ? getReadOnlyAppendSystemPrompt(runtimeConfig.runtime) : "", values.appendSystemPrompt || ""]
+      .filter(Boolean)
+      .join("\n\n");
+    claudeArgs.push("--append-system-prompt", appendPrompt);
+  }
+  if (values.model) {
+    claudeArgs.push("--model", values.model);
+  }
+  if (effort) {
+    claudeArgs.push("--effort", effort);
+  }
+  return claudeArgs;
+}
+
+function buildZcodeRunArgs({
+  prompt,
+  values,
+  stream,
+  yolo,
+  shouldResume,
+  previousSessionId,
+  disallowedTools,
+  maxTurns,
+  effort,
+  cwd,
+  notes
+}) {
+  const zcodeArgs = ["--prompt", prompt, "--output-format", stream ? "stream-json" : "json"];
+  zcodeArgs.push("--mode", yolo ? zcodeYoloMode : zcodeSafeMode);
+  zcodeArgs.push("--cwd", cwd);
+  if (shouldResume) {
+    zcodeArgs.push("--resume", previousSessionId);
+  }
+  if (disallowedTools) {
+    zcodeArgs.push("--disallowedTools", disallowedTools);
+  }
+  if (values.maxTurns !== undefined && maxTurns !== "0") {
+    notes.push("zcode 暂不支持 --max-turns，已忽略；超时仍由 --timeout-ms 控制。");
+  }
+  if (effort) {
+    notes.push("zcode 的思考等级由其自身配置决定，--effort 未转发。");
+  }
+  if (values.model) {
+    notes.push("zcode 的模型由其自身配置决定，--model 未转发。");
+  }
+  if (values.tools !== undefined) {
+    notes.push("zcode 未使用 --tools 白名单，只读由 --mode plan 保证。");
+  }
+  if (values.mcpConfig) {
+    notes.push("zcode 的 MCP 由其自身配置管理，--mcp-config 未转发。");
+  }
+  if (values.systemPrompt || values.appendSystemPrompt) {
+    notes.push("zcode 暂不支持 system prompt 覆盖，相关参数未转发。");
+  }
+  return zcodeArgs;
 }
 
 async function detectWslClaudeUser({ wslExe, wslDistro, wslClaude }) {
@@ -1481,7 +1706,7 @@ function agentMatchesTarget(agent, target) {
 }
 
 function extractPromptFromArgs(commandArgs) {
-  const index = commandArgs.findIndex((item) => item === "-p" || item === "--print");
+  const index = commandArgs.findIndex((item) => item === "-p" || item === "--print" || item === "--prompt");
   if (index === -1) {
     return "";
   }
@@ -1595,6 +1820,7 @@ function printHelp() {
   runmux doctor [选项]
   runmux health [选项]
   runmux transcript <agent|prefix> [选项]
+  runmux ui [选项]
   runmux list
   runmux show <agent>
   runmux reset <agent>
@@ -1643,6 +1869,16 @@ smoke：
 repair：
   复用已有 agent session，并把上次运行摘要、当前 git status --short 和 git diff --stat 注入 prompt，用于让持续 coder 返工。
 
+ui 选项：
+  --port <n>                   监听端口，默认 8788（被占用时自动顺延；0 表示随机端口）
+  --no-open                    不自动打开浏览器
+
+Web 控制台说明：
+  仅监听 127.0.0.1；写操作需要页面内令牌（防跨站请求），写入前自动备份原配置。
+  支持查看/切换 zcode、Claude Code、DSH 的默认模型；zcode 支持引导式新增 provider；
+  同时提供命名 agent 状态与最近运行日志查看。新增 provider 适配器时在 ui/config-adapters.mjs 注册。
+  默认 provider 可用 --provider 或环境变量 RUNMUX_PROVIDER 覆盖（claude/zcode）。
+
 执行限制：
   常规 ask/once/adversarial 默认 max-turns 20；repair 默认 12，diff-review 默认 8，smoke 默认 3。
   调用超时默认 600000 毫秒（10 分钟）。
@@ -1650,6 +1886,7 @@ repair：
   命名 ask 会持久化这两个设置；旧状态中的默认 max-turns 6 会在下次成功运行时升级为 20。
 
 ask 选项：
+  --provider <claude|zcode>     选择执行 provider，默认 claude；命名 agent 会记住该设置
   --cwd <path>                 首次创建 agent 时绑定工作目录
   --fresh                      不恢复旧 session，重新开始一轮
   --yolo                       开启改代码模式，跳过 Claude Code 权限确认，并对该 agent 持久生效
@@ -1674,7 +1911,15 @@ ask 选项：
   --last <n>                   transcript 使用，默认 5
   --timeout-ms <n|none>        默认 600000（10 分钟）；0/none/unlimited 表示不超时
   --claude <path>              指定 claude 可执行文件
+  --zcode <path>               指定 zcode 可执行文件（provider 为 zcode 时生效）
   --json                       输出完整 JSON
   --stream                     实时透传 Agent 原始 JSONL 事件；不能与 --json 同时使用
+
+zcode provider 说明：
+  安全模式映射为 zcode --mode plan（只读，由 zcode 运行时强制）；--yolo 映射为 --mode yolo。
+  会话续接使用 zcode --resume <sessionId>；--stream 透传 zcode 的 stream-json 事件。
+  zcode 暂不支持按次转发 --max-turns、--effort、--model、--tools、--mcp-config 和 system prompt，
+  这些参数会被校验后忽略并在 stderr 提示；模型与思考等级由 zcode 自身配置决定。
+  zcode 暂只支持 windows runtime，不支持 --runtime wsl。
 `);
 }

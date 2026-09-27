@@ -797,6 +797,239 @@ test("ask streams native Claude JSONL through the WSL runtime", async (t) => {
   assert.equal(runRecord.args.includes("--forward-subagent-text"), true);
 });
 
+test("once runs a zcode provider prompt with plan-mode safety defaults", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "ZCODE_ONCE_OK",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "zreviewer",
+    "hello zcode",
+    "--cwd",
+    env.workspace,
+    "--provider",
+    "zcode",
+    "--zcode",
+    env.fakeZcodeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  assert.match(run.stdout, /ZCODE_ONCE_OK/);
+
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--prompt") + 1], "hello zcode");
+  assert.equal(args[args.indexOf("--output-format") + 1], "json");
+  assert.equal(args[args.indexOf("--mode") + 1], "plan");
+  assert.equal(args[args.indexOf("--cwd") + 1], env.workspace);
+  assert.equal(args.includes("--resume"), false);
+  assert.equal(args.includes("--name"), false);
+  assert.equal(args.includes("--effort"), false);
+  assert.equal(args.includes("--allowedTools"), false);
+
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.deepEqual(state.agents, {});
+});
+
+test("ask persists the zcode provider and resumes its session", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "ZCODE_ASK_OK",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const first = await runAgent([
+    "ask",
+    "zcoder",
+    "first turn",
+    "--cwd",
+    env.workspace,
+    "--provider",
+    "zcode",
+    "--zcode",
+    env.fakeZcodeScript
+  ], env);
+  assert.equal(first.exitCode, 0, first.stderr);
+  assert.match(first.stdout, /ZCODE_ASK_OK/);
+
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.equal(state.agents.zcoder.provider, "zcode");
+  assert.equal(state.agents.zcoder.sessionId, "fake-zcode-session");
+  assert.equal(state.agents.zcoder.zcodeCommand, env.fakeZcodeScript);
+  assert.equal(state.agents.zcoder.claudeCommand, undefined);
+
+  const second = await runAgent(["ask", "zcoder", "second turn"], env);
+  assert.equal(second.exitCode, 0, second.stderr);
+
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--prompt") + 1], "second turn");
+  assert.equal(args[args.indexOf("--resume") + 1], "fake-zcode-session");
+  assert.equal(args[args.indexOf("--mode") + 1], "plan");
+});
+
+test("ask zcode yolo maps to yolo mode and streams zcode events", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "ZCODE_STREAM_OK",
+    streamDelayMs: 200,
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "ask",
+    "zcoder",
+    "stream progress",
+    "--cwd",
+    env.workspace,
+    "--provider",
+    "zcode",
+    "--zcode",
+    env.fakeZcodeScript,
+    "--yolo",
+    "--stream"
+  ], env, {
+    onFirstStdout: () => assert.equal(existsSync(env.finishPath), false)
+  });
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const lines = run.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((line) => line.type), ["turn.started", "result"]);
+  assert.equal(lines[1].response, "ZCODE_STREAM_OK");
+  assert.doesNotMatch(run.stdout, /\[runmux\]/);
+  assert.match(run.stderr, /YOLO 已启用：zcode/);
+
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--mode") + 1], "yolo");
+  assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.equal(state.agents.zcoder.yolo, true);
+  assert.equal(state.agents.zcoder.sessionId, "fake-zcode-session");
+
+  const transcript = await runAgent(["transcript", "zcoder"], env);
+  assert.equal(transcript.exitCode, 0, transcript.stderr);
+  assert.match(transcript.stdout, /ZCODE_STREAM_OK/);
+  assert.match(transcript.stdout, /stream progress/);
+});
+
+test("zcode validates effort but does not forward it", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "ZCODE_EFFORT_OK",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "zreviewer",
+    "use effort",
+    "--cwd",
+    env.workspace,
+    "--provider",
+    "zcode",
+    "--zcode",
+    env.fakeZcodeScript,
+    "--effort",
+    "high"
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args.includes("--effort"), false);
+  assert.match(run.stderr, /--effort 未转发/);
+});
+
+test("provider selection rejects unknown providers before invoking", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "SHOULD_NOT_RUN",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "reviewer",
+    "bad provider",
+    "--cwd",
+    env.workspace,
+    "--provider",
+    "gemini"
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /--provider 仅支持 claude 或 zcode/);
+  await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
+test("zcode rejects the wsl runtime before invoking", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "SHOULD_NOT_RUN",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent([
+    "once",
+    "zreviewer",
+    "wsl zcode",
+    "--cwd",
+    env.workspace,
+    "--provider",
+    "zcode",
+    "--zcode",
+    env.fakeZcodeScript,
+    "--runtime",
+    "wsl"
+  ], env);
+
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /zcode provider 暂只支持 windows runtime/);
+  await assert.rejects(readFile(env.capturePath, "utf8"), { code: "ENOENT" });
+});
+
+test("health reports zcode checks for the zcode provider", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "OK",
+    initialState: { version: 1, agents: {} }
+  });
+
+  const run = await runAgent(["health", "--provider", "zcode", "--zcode", env.fakeZcodeScript, "--json"], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  const payload = JSON.parse(run.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.checks.some((check) => check.name === "zcode --version" && check.status === "ok"), true);
+  assert.equal(payload.checks.some((check) => check.name === "zcode flags" && check.status === "ok"), true);
+  assert.equal(payload.checks.some((check) => check.name === "claude --version"), false);
+});
+
+test("smoke works with the zcode provider without persisting state", async (t) => {
+  const env = await setupHarness(t, {
+    fakeResult: "RUNMUX_SMOKE_OK\nREADME.md: 存在",
+    initialState: { version: 1, agents: {} }
+  });
+  await writeFile(path.join(env.workspace, "README.md"), "# Smoke\n", "utf8");
+
+  const run = await runAgent([
+    "smoke",
+    "--cwd",
+    env.workspace,
+    "--probe-file",
+    "README.md",
+    "--provider",
+    "zcode",
+    "--zcode",
+    env.fakeZcodeScript
+  ], env);
+
+  assert.equal(run.exitCode, 0, run.stderr);
+  assert.match(run.stdout, /\[OK\] smoke/);
+  assert.match(run.stdout, /README\.md: 存在/);
+
+  const args = await readCapturedArgs(env.capturePath);
+  assert.equal(args[args.indexOf("--mode") + 1], "plan");
+  assert.equal(args.includes("--resume"), false);
+
+  const state = JSON.parse(await readFile(env.statePath, "utf8"));
+  assert.deepEqual(state.agents, {});
+});
+
 async function setupHarness(t, options) {
   const root = await mkdtemp(path.join(os.tmpdir(), "runmux-test-"));
   const workspace = path.join(root, "workspace");
@@ -811,6 +1044,7 @@ async function setupHarness(t, options) {
   await writeFile(statePath, `${JSON.stringify(options.initialState, null, 2)}\n`, "utf8");
 
   const fakeScript = path.join(binDir, "fake-claude.mjs");
+  const fakeZcodeScript = path.join(binDir, "fake-zcode.mjs");
   const fakeWslScript = path.join(binDir, "fake-wsl.mjs");
   const fakeCmd = path.join(binDir, "claude.cmd");
   const fakeClaudePackageDir = path.join(
@@ -878,6 +1112,53 @@ console.log(JSON.stringify({
     `${JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "bin/claude.mjs" } }, null, 2)}\n`,
     "utf8"
   );
+  await writeFile(fakeZcodeScript, `
+import { appendFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+appendFileSync(process.env.CLAUDE_CAPTURE_PATH, JSON.stringify(args) + "\\n");
+
+if (args.includes("--version")) {
+  console.log("zcode-app-cli 3.11.2-24");
+  console.log("zcode-runtime 0.16.5");
+  process.exit(0);
+}
+
+if (args.includes("--help")) {
+  console.log("--prompt <text> --cwd <path> --disallowedTools, --disallowed-tools --mode <mode> --resume <sessionId>");
+  process.exit(0);
+}
+
+const outputFormatIndex = args.indexOf("--output-format");
+if (outputFormatIndex >= 0 && args[outputFormatIndex + 1] === "stream-json") {
+  process.stdout.write(JSON.stringify({
+    type: "turn.started",
+    sessionId: "fake-zcode-session"
+  }) + "\\n");
+  if (process.env.CLAUDE_FAKE_STREAM_MALFORMED === "1") {
+    process.stdout.write("not-json\\n");
+  }
+  const delayMs = Number(process.env.CLAUDE_FAKE_STREAM_DELAY_MS || 0);
+  if (delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  appendFileSync(process.env.CLAUDE_FAKE_FINISH_PATH, "done\\n");
+  if (process.env.CLAUDE_FAKE_STREAM_OMIT_RESULT !== "1") {
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      sessionId: "fake-zcode-session",
+      response: process.env.CLAUDE_FAKE_RESULT || "OK"
+    }) + "\\n");
+  }
+  process.exit(Number(process.env.CLAUDE_FAKE_EXIT_CODE || 0));
+}
+
+console.log(JSON.stringify({
+  sessionId: "fake-zcode-session",
+  response: process.env.CLAUDE_FAKE_RESULT || "OK",
+  usage: { totalTokens: 10 }
+}));
+`, "utf8");
   await writeFile(fakeWslScript, `
 import { appendFileSync } from "node:fs";
 
@@ -965,6 +1246,7 @@ process.exit(1);
     capturePath,
     finishPath,
     fakeScript,
+    fakeZcodeScript,
     fakeWslScript,
     env: {
       ...process.env,

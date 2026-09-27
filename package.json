@@ -12,6 +12,7 @@
     "runmux.mjs",
     "runmux.cmd",
     "runmux.ps1",
+    "ui",
     "skills/runmux",
     "README.md",
     "LICENSE",
